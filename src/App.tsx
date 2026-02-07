@@ -185,7 +185,7 @@ function computePointsFromMatches(
 
   const priorCompleted = new Map<string, number>();
   if (soN >= 3 && season) {
-    const soireesAsc = [...season.soirees].sort((a, b) => a.number - b.number);
+    const soireesAsc = [...season.soirees].sort((a: Soiree, b: Soiree) => a.number - b.number);
     for (const s of soireesAsc) {
       if (s.number >= soN) break;
       for (const rb of s.rebuys) {
@@ -197,7 +197,7 @@ function computePointsFromMatches(
     }
   }
 
-  const sortedRebuys = [...rebuyMatches].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  const sortedRebuys = [...rebuyMatches].sort((a: RebuyMatch, b: RebuyMatch) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
   const localCompleted = new Map<string, number>();
   const doneBefore = (buyer: string) => (priorCompleted.get(buyer) ?? 0) + (localCompleted.get(buyer) ?? 0);
@@ -260,7 +260,7 @@ function aggregateSeasonStats(season: Season) {
     bonus: bonus.get(name) ?? 0,
   }));
 
-  table.sort((a, b) => {
+  table.sort((a: { name: string; pts: number; wins: number; bonus: number }, b: { name: string; pts: number; wins: number; bonus: number }) => {
     if (b.pts !== a.pts) return b.pts - a.pts;
     if (b.wins !== a.wins) return b.wins - a.wins;
     return a.name.localeCompare(b.name);
@@ -319,7 +319,7 @@ function computeWinStreaks(season: Season) {
   }
 
   const out = allPlayers.map((p) => ({ player: p, best: best.get(p) ?? 0 }));
-  out.sort((a, b) => b.best - a.best || a.player.localeCompare(b.player));
+  out.sort((a: { player: string; best: number }, b: { player: string; best: number }) => b.best - a.best || a.player.localeCompare(b.player));
   return out;
 }
 
@@ -419,8 +419,8 @@ function sanitizeState(raw: any): AppState {
           dateLabel: normName(s?.dateLabel) || undefined,
           createdAt: Number(s?.createdAt ?? Date.now()),
           pools: { A: poolsA, B: poolsB },
-          matches: matches.sort((a, b) => a.order - b.order),
-          rebuys: rebuys.sort((a, b) => a.createdAt - b.createdAt),
+        matches: matches.sort((a: CoreMatch, b: CoreMatch) => a.order - b.order),
+        rebuys: rebuys.sort((a: RebuyMatch, b: RebuyMatch) => a.createdAt - b.createdAt),
           qualifiersOverride:
             s?.qualifiersOverride && typeof s.qualifiersOverride === "object"
               ? {
@@ -623,15 +623,16 @@ export default function App() {
   const [editingPlayerName, setEditingPlayerName] = useState("");
   const [newSeasonName, setNewSeasonName] = useState("");
   const [copyPlayersForNewSeason, setCopyPlayersForNewSeason] = useState(true);
+  const currentSeasons: Season[] = state.seasons;
   const [selectedSoireeNumber, setSelectedSoireeNumber] = useState<number>(() => {
-    const max = Math.max(...currentSeasons[0].soirees.map((s) => s.number));
+    const max = Math.max(...currentSeasons[0].soirees.map((s: Soiree) => s.number));
     return max;
   });
 
   const savingRef = useRef<number | null>(null);
 
-  const currentSeason = useMemo(() => {
-    return currentSeasons.find((s) => s.id === state.activeSeasonId) ?? currentSeasons[0];
+  const currentSeason = useMemo<Season>(() => {
+    return currentSeasons.find((s: Season) => s.id === state.activeSeasonId) ?? currentSeasons[0];
   }, [currentSeasons, state.activeSeasonId]);
 
   useEffect(() => {
@@ -651,15 +652,15 @@ export default function App() {
   }, [compactMode]);
 
   useEffect(() => {
-    if (!state.seasons.find((s) => s.id === state.activeSeasonId)) {
+    if (!currentSeasons.find((s: Season) => s.id === state.activeSeasonId)) {
       setState((prev) => ({ ...prev, activeSeasonId: prev.seasons[0]?.id ?? prev.activeSeasonId }));
     }
-  }, [state.activeSeasonId, state.seasons]);
+  }, [state.activeSeasonId, currentSeasons]);
 
   useEffect(() => {
-    const exists = currentSeason.soirees.some((s) => s.number === selectedSoireeNumber);
+    const exists = currentSeason.soirees.some((s: Soiree) => s.number === selectedSoireeNumber);
     if (!exists) {
-      const max = Math.max(...currentSeason.soirees.map((s) => s.number));
+      const max = Math.max(...currentSeason.soirees.map((s: Soiree) => s.number));
       setSelectedSoireeNumber(max);
     }
   }, [currentSeason.soirees, selectedSoireeNumber]);
@@ -671,32 +672,34 @@ export default function App() {
 
   const playerColors = useMemo(() => {
     const map = new Map<string, string>();
-    currentSeason.players.forEach((p, i) => map.set(p, PALETTE[i % PALETTE.length]));
+    currentSeason.players.forEach((p: string, i: number) => map.set(p, PALETTE[i % PALETTE.length]));
     return map;
   }, [currentSeason.players]);
 
   const currentSoiree = useMemo(() => {
-    return currentSeason.soirees.find((s) => s.number === selectedSoireeNumber) ?? currentSeason.soirees[0];
+    return currentSeason.soirees.find((s: Soiree) => s.number === selectedSoireeNumber) ?? currentSeason.soirees[0];
   }, [currentSeason.soirees, selectedSoireeNumber]);
 
 
   const currentPoolStandings = useMemo(() => {
-    const poolMatches = currentSoiree.matches.filter((m) => m.phase === "POULE");
+    const poolMatches = currentSoiree.matches.filter((m: CoreMatch) => m.phase === "POULE");
 
     const calcPool = (pool: "A" | "B") => {
       const players = currentSoiree.pools[pool];
-      const relevant = poolMatches.filter((m) => m.pool === pool);
+      const relevant = poolMatches.filter((m: CoreMatch) => m.pool === pool);
 
       const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
 
-      const rows = players.map((p) => ({
+      const rows = players.map((p: string) => ({
         name: p,
         pts: pts.get(p) ?? 0,
         wins: wins.get(p) ?? 0,
         bonus: bonus.get(p) ?? 0,
       }));
 
-      rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name));
+      rows.sort((a: { name: string; pts: number; wins: number; bonus: number }, b: { name: string; pts: number; wins: number; bonus: number }) =>
+        b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name)
+      );
       return rows;
     };
 
@@ -704,7 +707,7 @@ export default function App() {
   }, [currentSoiree.matches, currentSoiree.pools, currentSoiree.number, currentSeason]);
 
   const allSoireeNumbers = useMemo(() => {
-    return [...currentSeason.soirees].map((s) => s.number).sort((a, b) => a - b);
+    return [...currentSeason.soirees].map((s: Soiree) => s.number).sort((a: number, b: number) => a - b);
   }, [currentSeason.soirees]);
 
   function updateSeason(mutator: (season: Season) => Season) {
@@ -999,7 +1002,7 @@ export default function App() {
     });
 
     setTimeout(() => {
-      const max = Math.max(...currentSeason.soirees.map((s) => s.number)) + 1;
+      const max = Math.max(...currentSeason.soirees.map((s: Soiree) => s.number)) + 1;
       setSelectedSoireeNumber(max);
       setTab("SOIREE");
     }, 0);
@@ -1007,9 +1010,9 @@ export default function App() {
 
   function setMatchWinner(matchId: string, winner: string) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m) => {
+        const matches = s.matches.map((m: CoreMatch) => {
           if (m.id !== matchId) return m;
           const w = normName(winner);
           const valid = w && (w === normName(m.a) || w === normName(m.b));
@@ -1027,9 +1030,9 @@ export default function App() {
 
   function setMatchCheckout100(matchId: string, val: boolean) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m) => {
+        const matches = s.matches.map((m: CoreMatch) => {
           if (m.id !== matchId) return m;
           if (!normName(m.winner)) return { ...m, checkout100: false };
           return { ...m, checkout100: Boolean(val) };
@@ -1042,9 +1045,9 @@ export default function App() {
 
   function swapMatchPlayers(matchId: string) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m) => {
+        const matches = s.matches.map((m: CoreMatch) => {
           if (m.id !== matchId) return m;
           const a = m.b;
           const b = m.a;
@@ -1059,19 +1062,21 @@ export default function App() {
   }
 
   function recalcFinalsFromPools() {
-    const poolMatches = currentSoiree.matches.filter((m) => m.phase === "POULE");
+    const poolMatches = currentSoiree.matches.filter((m: CoreMatch) => m.phase === "POULE");
 
     const calcPool = (pool: "A" | "B") => {
       const players = currentSoiree.pools[pool];
-      const relevant = poolMatches.filter((m) => m.pool === pool);
+      const relevant = poolMatches.filter((m: CoreMatch) => m.pool === pool);
       const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
-      const rows = players.map((p) => ({
+      const rows = players.map((p: string) => ({
         name: p,
         pts: pts.get(p) ?? 0,
         wins: wins.get(p) ?? 0,
         bonus: bonus.get(p) ?? 0,
       }));
-      rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name));
+      rows.sort((a: { name: string; pts: number; wins: number; bonus: number }, b: { name: string; pts: number; wins: number; bonus: number }) =>
+        b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name)
+      );
       return rows;
     };
 
@@ -1085,14 +1090,16 @@ export default function App() {
     const B2 = ov.B2 || (B[1]?.name ?? "");
 
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
 
-        const demisSorted = s.matches.filter((x) => x.phase === "DEMI").sort((x, y) => x.order - y.order);
+        const demisSorted = s.matches
+          .filter((x: CoreMatch) => x.phase === "DEMI")
+          .sort((x: CoreMatch, y: CoreMatch) => x.order - y.order);
 
-        const matches = s.matches.map((m) => {
+        const matches = s.matches.map((m: CoreMatch) => {
           if (m.phase !== "DEMI") return m;
-          const demiIndex = demisSorted.findIndex((x) => x.id === m.id);
+          const demiIndex = demisSorted.findIndex((x: CoreMatch) => x.id === m.id);
           if (demiIndex === 0) {
             return { ...m, a: A1, b: B2, winner: m.winner && (m.winner === A1 || m.winner === B2) ? m.winner : "" };
           }
@@ -1110,7 +1117,9 @@ export default function App() {
   }
 
   function recalcFinalAndPFinal() {
-    const demis = currentSoiree.matches.filter((m) => m.phase === "DEMI").sort((a, b) => a.order - b.order);
+    const demis = currentSoiree.matches
+      .filter((m: CoreMatch) => m.phase === "DEMI")
+      .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order);
     if (demis.length < 2) return;
 
     const d1 = demis[0];
@@ -1122,9 +1131,9 @@ export default function App() {
     const l2 = w2 ? (w2 === d2.a ? d2.b : w2 === d2.b ? d2.a : "") : "";
 
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m) => {
+        const matches = s.matches.map((m: CoreMatch) => {
           if (m.phase === "FINAL") {
             const a = w1 && w2 ? w1 : "";
             const b = w1 && w2 ? w2 : "";
@@ -1147,7 +1156,7 @@ export default function App() {
 
   function addRebuy() {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
         const rb: RebuyMatch = {
           id: uid("rb"),
@@ -1165,9 +1174,9 @@ export default function App() {
 
   function updateRebuy(id: string, patch: Partial<RebuyMatch>) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        const rebuys = s.rebuys.map((r) => (r.id === id ? { ...r, ...patch } : r));
+        const rebuys = s.rebuys.map((r: RebuyMatch) => (r.id === id ? { ...r, ...patch } : r));
         return { ...s, rebuys };
       });
       return { ...season, soirees };
@@ -1176,17 +1185,17 @@ export default function App() {
 
   function deleteRebuy(id: string) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        return { ...s, rebuys: s.rebuys.filter((r) => r.id !== id) };
+        return { ...s, rebuys: s.rebuys.filter((r: RebuyMatch) => r.id !== id) };
       });
       return { ...season, soirees };
     });
   }
 
   const currentPodium = useMemo(() => {
-    const final = currentSoiree.matches.find((m) => m.phase === "FINAL");
-    const pfinal = currentSoiree.matches.find((m) => m.phase === "PFINAL");
+    const final = currentSoiree.matches.find((m: CoreMatch) => m.phase === "FINAL");
+    const pfinal = currentSoiree.matches.find((m: CoreMatch) => m.phase === "PFINAL");
 
     const wFinal = normName(final?.winner ?? "");
     const aFinal = normName(final?.a ?? "");
@@ -1199,12 +1208,14 @@ export default function App() {
 
     if (!wFinal || !second || !third) {
       const { pts, wins } = computePointsFromMatches(currentSoiree.matches, [], currentSoiree.number, currentSeason);
-      const rows = currentSeason.players.map((p) => ({
+      const rows = currentSeason.players.map((p: string) => ({
         name: p,
         pts: pts.get(p) ?? 0,
         wins: wins.get(p) ?? 0,
       }));
-      rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
+      rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
+        b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
+      );
       return {
         first: rows[0]?.name ?? "",
         second: rows[1]?.name ?? "",
@@ -1227,8 +1238,8 @@ export default function App() {
     for (const p of currentSeason.players) totals.set(p, 0);
 
     const podiumFromSoiree = (s: Soiree) => {
-      const final = s.matches.find((m) => m.phase === "FINAL");
-      const pfinal = s.matches.find((m) => m.phase === "PFINAL");
+      const final = s.matches.find((m: CoreMatch) => m.phase === "FINAL");
+      const pfinal = s.matches.find((m: CoreMatch) => m.phase === "PFINAL");
 
       const wFinal = normName(final?.winner ?? "");
       const aFinal = normName(final?.a ?? "");
@@ -1239,8 +1250,10 @@ export default function App() {
 
       if (!wFinal || !second || !third) {
         const { pts, wins } = computePointsFromMatches(s.matches, [], s.number, currentSeason);
-        const rows = currentSeason.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
-        rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
+        const rows = currentSeason.players.map((p: string) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
+        rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
+          b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
+        );
         return { first: rows[0]?.name ?? "", second: rows[1]?.name ?? "", third: rows[2]?.name ?? "" };
       }
 
