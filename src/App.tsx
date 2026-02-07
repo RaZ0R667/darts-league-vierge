@@ -343,17 +343,6 @@ function computeHeadToHead(season: Season) {
   return { players, matrix };
 }
 
-const DEFAULT_PLAYERS = [
-  "ANGEL",
-  "SAMUEL",
-  "MARVIN",
-  "CLÉMENT",
-  "ACHIL",
-  "BAPTISTE",
-  "EMERIC",
-  "JOAO",
-];
-
 function makeEmptySoiree(number = 1): Soiree {
   return {
     id: uid("s"),
@@ -371,7 +360,7 @@ function makeInitialState(): AppState {
     season: {
       id: uid("season"),
       name: "Saison 1",
-      players: [...DEFAULT_PLAYERS],
+      players: [],
       soirees: [makeEmptySoiree(1)],
     },
   };
@@ -610,6 +599,7 @@ export default function App() {
   const [importText, setImportText] = useState("");
   const [showExport, setShowExport] = useState(false);
   const [exportText, setExportText] = useState("");
+  const [newPlayerName, setNewPlayerName] = useState("");
   const [selectedSoireeNumber, setSelectedSoireeNumber] = useState<number>(() => {
     const max = Math.max(...state.season.soirees.map((s) => s.number));
     return max;
@@ -688,6 +678,42 @@ export default function App() {
     setState((prev) => ({ ...prev, season: mutator(prev.season) }));
   }
 
+  function addPlayer(nameRaw: string) {
+    const name = normName(nameRaw);
+    if (!name) return;
+    updateSeason((season) => {
+      if (season.players.includes(name)) return season;
+      return { ...season, players: [...season.players, name] };
+    });
+  }
+
+  function removePlayer(name: string) {
+    updateSeason((season) => {
+      const players = season.players.filter((p) => p !== name);
+      const soirees = season.soirees.map((s) => ({
+        ...s,
+        pools: {
+          A: s.pools.A.filter((p) => p !== name),
+          B: s.pools.B.filter((p) => p !== name),
+        },
+        matches: s.matches.map((m) => ({
+          ...m,
+          a: m.a === name ? "" : m.a,
+          b: m.b === name ? "" : m.b,
+          winner: m.winner === name ? "" : m.winner,
+        })),
+        rebuys: s.rebuys.map((r) => ({
+          ...r,
+          buyer: r.buyer === name ? "" : r.buyer,
+          a: r.a === name ? "" : r.a,
+          b: r.b === name ? "" : r.b,
+          winner: r.winner === name ? "" : r.winner,
+        })),
+      }));
+      return { ...season, players, soirees };
+    });
+  }
+
   function setQualifiersOverride(patch: Partial<NonNullable<Soiree["qualifiersOverride"]>>) {
     updateSeason((season) => {
       const soirees = season.soirees.map((s) => {
@@ -756,6 +782,10 @@ export default function App() {
   }
 
   function startNewSoiree() {
+    if (state.season.players.length < 2) {
+      alert("Ajoute d’abord les joueurs (au moins 2).");
+      return;
+    }
     updateSeason((season) => {
       const nextNumber = Math.max(...season.soirees.map((s) => s.number)) + 1;
       const players = season.players;
@@ -1980,21 +2010,52 @@ export default function App() {
 
         {tab === "PARAMS" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Section title="Joueurs (Saison 1)">
+            <Section title="Joueurs (saison en cours)">
               <div className="text-sm text-white/70 mb-3">
-                Les noms servent partout (matchs, menus, stats). Garde des noms stables (accents inclus).
+                Ajoute tes joueurs ici. Les noms servent partout (matchs, menus, stats). Garde des noms stables (accents inclus).
+              </div>
+              <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-[1fr,auto]">
+                <input
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
+                  placeholder="Nom du joueur…"
+                  value={newPlayerName}
+                  onChange={(e) => setNewPlayerName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      addPlayer(newPlayerName);
+                      setNewPlayerName("");
+                    }
+                  }}
+                />
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    addPlayer(newPlayerName);
+                    setNewPlayerName("");
+                  }}
+                >
+                  Ajouter
+                </Button>
               </div>
               <div className="space-y-2">
+                {state.season.players.length === 0 && (
+                  <div className="text-sm text-white/60">Aucun joueur pour l’instant. Ajoute-les ci-dessus.</div>
+                )}
                 {state.season.players.map((p, idx) => (
                   <div
                     key={p}
-                    className="flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2"
+                    className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2"
                   >
                     <div className="flex items-center gap-2">
                       <span className="h-3 w-3 rounded-full" style={{ background: playerColors.get(p) ?? "#ffffff33" }} />
                       <span className="font-semibold">{p}</span>
                     </div>
-                    <span className="text-xs text-white/60">Couleur #{idx + 1}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-white/60">Couleur #{idx + 1}</span>
+                      <Button variant="danger" onClick={() => removePlayer(p)}>
+                        Supprimer
+                      </Button>
+                    </div>
                   </div>
                 ))}
               </div>
