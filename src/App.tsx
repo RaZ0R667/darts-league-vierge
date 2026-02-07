@@ -1866,11 +1866,13 @@ export default function App() {
               <div className="space-y-2">
                 {currentSeason.soirees
                   .slice()
-                  .sort((a, b) => b.number - a.number)
+                  .sort((a: Soiree, b: Soiree) => b.number - a.number)
                   .map((s) => {
                     const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
-                    const rows = currentSeason.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
-                    rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
+                    const rows = currentSeason.players.map((p: string) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
+                    rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
+                      b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
+                    );
                     const podium = rows.slice(0, 3);
                     return (
                       <button
@@ -1887,8 +1889,8 @@ export default function App() {
                         </div>
                         <div className="mt-2 text-sm text-white/70">
                           Podium: {(() => {
-                            const final = s.matches.find((m) => m.phase === "FINAL");
-                            const pfinal = s.matches.find((m) => m.phase === "PFINAL");
+                        const final = s.matches.find((m: CoreMatch) => m.phase === "FINAL");
+                        const pfinal = s.matches.find((m: CoreMatch) => m.phase === "PFINAL");
                             const wFinal = normName(final?.winner ?? "");
                             const aFinal = normName(final?.a ?? "");
                             const bFinal = normName(final?.b ?? "");
@@ -1896,8 +1898,8 @@ export default function App() {
                             const third = normName(pfinal?.winner ?? "");
                             const ok = wFinal && second && third;
                             if (ok) return `1) ${wFinal} • 2) ${second} • 3) ${third}`;
-                            return podium.map((p, i) => `${i + 1}) ${p.name} (${p.pts})`).join(" • ");
-                          })()}
+                        return podium.map((p: { name: string; pts: number }, i: number) => `${i + 1}) ${p.name} (${p.pts})`).join(" • ");
+                      })()}
                         </div>
                         <div className="mt-2 flex flex-wrap gap-2">
                           <Pill>
@@ -1927,8 +1929,8 @@ export default function App() {
                   <tbody>
                     {currentSoiree.matches
                       .slice()
-                      .sort((a, b) => a.order - b.order)
-                      .map((m) => (
+                      .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
+                      .map((m: CoreMatch) => (
                         <tr key={m.id} className="border-t border-white/10">
                           <td className="py-2 pr-2 text-white/70">{m.order}</td>
                           <td className="py-2 pr-2">
@@ -1967,7 +1969,7 @@ export default function App() {
                   <div className="text-sm text-white/70">Aucun re-buy pour cette soirée.</div>
                 ) : (
                   <div className="space-y-3">
-                    {currentSoiree.rebuys.map((r, idx) => {
+                    {currentSoiree.rebuys.map((r: RebuyMatch, idx: number) => {
                       const players = currentSeason.players;
                       const buyer = normName(r.buyer);
                       const a = normName(r.a);
@@ -1992,7 +1994,7 @@ export default function App() {
                         }
                         doneBefore += currentSoiree.rebuys
                           .slice(0, idx)
-                          .filter((x) => normName(x.buyer) === buyerN && normName(x.winner)).length;
+                          .filter((x: RebuyMatch) => normName(x.buyer) === buyerN && normName(x.winner)).length;
 
                         const winPts = doneBefore === 0 ? 2 : 1;
                         return winnerN === buyerN
@@ -2096,7 +2098,7 @@ export default function App() {
                     Soirées jouées : <span className="font-semibold text-white">{currentSeason.soirees.length}</span>
                   </div>
                   <div>
-                    Rebuys total : <span className="font-semibold text-white">{currentSeason.soirees.reduce((s, x) => s + x.rebuys.length, 0)}</span>
+                    Rebuys total : <span className="font-semibold text-white">{currentSeason.soirees.reduce((s: number, x: Soiree) => s + x.rebuys.length, 0)}</span>
                   </div>
                   <div className="mt-2">
                     Jackpot actuel : <span className="font-extrabold text-white">{formatEUR(jackpotEUR)}</span>
@@ -2286,7 +2288,7 @@ export default function App() {
                 {currentSeason.players.length === 0 && (
                   <div className="text-sm text-white/60">Aucun joueur pour l’instant. Ajoute-les ci-dessus.</div>
                 )}
-                {currentSeason.players.map((p, idx) => (
+                {currentSeason.players.map((p: string, idx: number) => (
                   <div
                     key={p}
                     className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2"
