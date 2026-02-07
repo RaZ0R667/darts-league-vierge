@@ -1254,8 +1254,8 @@ export default function App() {
       if (third) totals.set(third, (totals.get(third) ?? 0) + MONEY.podiumEUR.third);
     }
 
-    const out = currentSeason.players.map((p) => ({ player: p, eur: totals.get(p) ?? 0 }));
-    out.sort((a, b) => b.eur - a.eur || a.player.localeCompare(b.player));
+    const out = currentSeason.players.map((p: string) => ({ player: p, eur: totals.get(p) ?? 0 }));
+    out.sort((a: { player: string; eur: number }, b: { player: string; eur: number }) => b.eur - a.eur || a.player.localeCompare(b.player));
     return out;
   }, [currentSeason.players, currentSeason.soirees]);
 
@@ -1379,8 +1379,8 @@ export default function App() {
                 <div className={`space-y-3 ${cardsMode ? "block" : "md:hidden"}`}>
                   {currentSoiree.matches
                     .slice()
-                    .sort((a, b) => a.order - b.order)
-                    .map((m) => {
+                    .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
+                    .map((m: CoreMatch) => {
                       const winner = normName(m.winner);
                       const bonus = m.checkout100 ? 1 : 0;
                       const basePts = m.phase === "PFINAL" ? 1 : 2;
@@ -1526,8 +1526,8 @@ export default function App() {
                     <tbody>
                       {currentSoiree.matches
                         .slice()
-                        .sort((a, b) => a.order - b.order)
-                        .map((m) => {
+                        .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
+                        .map((m: CoreMatch) => {
                           const options = [m.a, m.b].map(normName).filter(Boolean);
                           const winner = normName(m.winner);
                           const bonus = m.checkout100 ? 1 : 0;
@@ -1613,7 +1613,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {currentPoolStandings[pool].map((r, idx) => (
+                          {currentPoolStandings[pool].map((r: { name: string; pts: number; wins: number; bonus: number }, idx: number) => (
                             <tr key={r.name} className="border-t border-white/10">
                               <td className="py-1">{idx + 1}</td>
                               <td className="py-1 font-semibold">{r.name}</td>
@@ -1636,7 +1636,7 @@ export default function App() {
                         <Pill>Pts ➜ V ➜ Bonus</Pill>
                       </div>
                       <div className="mt-2 space-y-1">
-                        {currentPoolStandings[pool].map((r, idx) => (
+                        {currentPoolStandings[pool].map((r: { name: string; pts: number; wins: number; bonus: number }, idx: number) => (
                           <div key={r.name} className="flex items-center justify-between rounded-lg bg-black/20 px-2 py-1">
                             <div className="flex items-center gap-2">
                               <span className="text-white/60 w-5">{idx + 1}.</span>
@@ -1741,7 +1741,7 @@ export default function App() {
                   <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3">
                     <div className="text-xs text-white/60">Gains cumulés (saison)</div>
                     <div className="mt-2 space-y-1">
-                      {totalGainsEUR.slice(0, 6).map((x) => (
+                      {totalGainsEUR.slice(0, 6).map((x: { player: string; eur: number }) => (
                         <div key={x.player} className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(x.player) ?? "#ffffff33" }} />
@@ -1817,7 +1817,7 @@ export default function App() {
                 <div className="rounded-xl border border-white/10 bg-black/30 p-3">
                   <div className="text-xs text-white/60">Gains cumulés (top 5)</div>
                   <div className="mt-2 space-y-1">
-                    {totalGainsEUR.slice(0, 5).map((x) => (
+                    {totalGainsEUR.slice(0, 5).map((x: { player: string; eur: number }) => (
                       <div key={x.player} className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(x.player) ?? "#ffffff33" }} />
@@ -1834,13 +1834,13 @@ export default function App() {
             <Section title="Graph (simple) — Points par soirée">
               <div className="text-xs text-white/60 mb-2">Mini-graph: barres ASCII (lisible sans librairie)</div>
               <div className="space-y-2">
-                {allSoireeNumbers.map((n) => {
-                  const so = currentSeason.soirees.find((s) => s.number === n)!;
+                {allSoireeNumbers.map((n: number) => {
+                  const so = currentSeason.soirees.find((s: Soiree) => s.number === n)!;
                   const { pts } = computePointsFromMatches(so.matches, so.rebuys, so.number, currentSeason);
-                  const top = Math.max(...currentSeason.players.map((p) => pts.get(p) ?? 0), 1);
+                  const top = Math.max(...currentSeason.players.map((p: string) => pts.get(p) ?? 0), 1);
                   const topPlayer = currentSeason.players
-                    .map((p) => ({ p, v: pts.get(p) ?? 0 }))
-                    .sort((a, b) => b.v - a.v || a.p.localeCompare(b.p))[0];
+                    .map((p: string) => ({ p, v: pts.get(p) ?? 0 }))
+                    .sort((a: { p: string; v: number }, b: { p: string; v: number }) => b.v - a.v || a.p.localeCompare(b.p))[0];
                   const width = Math.round((topPlayer.v / top) * 24);
                   return (
                     <div key={n} className="rounded-xl border border-white/10 bg-black/30 p-3">
@@ -1867,7 +1867,7 @@ export default function App() {
                 {currentSeason.soirees
                   .slice()
                   .sort((a: Soiree, b: Soiree) => b.number - a.number)
-                  .map((s) => {
+                  .map((s: Soiree) => {
                     const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
                     const rows = currentSeason.players.map((p: string) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
                     rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
