@@ -61,11 +61,12 @@ type Season = {
 
 type AppState = {
   version: number;
-  season: Season;
+  seasons: Season[];
+  activeSeasonId: string;
 };
 
-const STORAGE_KEY = "darts_league_app_v1";
-const VERSION = 1;
+const STORAGE_KEY = "darts_league_app_v2";
+const VERSION = 2;
 
 const MONEY = {
   entryFeeEUR: 3,
@@ -354,15 +355,21 @@ function makeEmptySoiree(number = 1): Soiree {
   };
 }
 
+function makeEmptySeason(name = "Saison 1"): Season {
+  return {
+    id: uid("season"),
+    name,
+    players: [],
+    soirees: [makeEmptySoiree(1)],
+  };
+}
+
 function makeInitialState(): AppState {
+  const season = makeEmptySeason("Saison 1");
   return {
     version: VERSION,
-    season: {
-      id: uid("season"),
-      name: "Saison 1",
-      players: [],
-      soirees: [makeEmptySoiree(1)],
-    },
+    seasons: [season],
+    activeSeasonId: season.id,
   };
 }
 
@@ -371,80 +378,90 @@ function sanitizeState(raw: any): AppState {
   try {
     if (!raw || typeof raw !== "object") return fallback;
     const v = Number(raw.version ?? 0);
-    const season = raw.season;
-    if (!season || typeof season !== "object") return fallback;
+    const seasonsRaw = Array.isArray(raw.seasons)
+      ? raw.seasons
+      : raw.season && typeof raw.season === "object"
+        ? [raw.season]
+        : [];
 
-    const players = uniq((season.players ?? []).map(normName)).filter(isNonEmptyString);
-    const soirees: Soiree[] = (season.soirees ?? []).map((s: any, i: number) => {
-      const poolsA = (s?.pools?.A ?? []).map(normName).filter(Boolean);
-      const poolsB = (s?.pools?.B ?? []).map(normName).filter(Boolean);
+    const sanitizeSeason = (season: any, i: number): Season => {
+      const players = uniq((season?.players ?? []).map(normName)).filter(isNonEmptyString);
+      const soirees: Soiree[] = (season?.soirees ?? []).map((s: any, idx: number) => {
+        const poolsA = (s?.pools?.A ?? []).map(normName).filter(isNonEmptyString);
+        const poolsB = (s?.pools?.B ?? []).map(normName).filter(isNonEmptyString);
 
-      const matches: CoreMatch[] = (s?.matches ?? []).map((m: any, idx: number) => ({
-        id: normName(m?.id) || uid("m"),
-        order: clampInt(Number(m?.order ?? idx + 1), 1, 9999),
-        phase: (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase,
-        pool: m?.pool === "A" || m?.pool === "B" ? m.pool : null,
-        format: Number(m?.format) === 501 ? 501 : 301,
-        bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as any,
-        maxTurns: clampInt(Number(m?.maxTurns ?? 10), 1, 50),
-        a: normName(m?.a),
-        b: normName(m?.b),
-        winner: normName(m?.winner),
-        checkout100: Boolean(m?.checkout100),
-      }));
+        const matches: CoreMatch[] = (s?.matches ?? []).map((m: any, midx: number) => ({
+          id: normName(m?.id) || uid("m"),
+          order: clampInt(Number(m?.order ?? midx + 1), 1, 9999),
+          phase: (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase,
+          pool: m?.pool === "A" || m?.pool === "B" ? m.pool : null,
+          format: Number(m?.format) === 501 ? 501 : 301,
+          bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as any,
+          maxTurns: clampInt(Number(m?.maxTurns ?? 10), 1, 50),
+          a: normName(m?.a),
+          b: normName(m?.b),
+          winner: normName(m?.winner),
+          checkout100: Boolean(m?.checkout100),
+        }));
 
-      const rebuys: RebuyMatch[] = (s?.rebuys ?? []).map((r: any) => ({
-        id: normName(r?.id) || uid("rb"),
-        buyer: normName(r?.buyer),
-        a: normName(r?.a),
-        b: normName(r?.b),
-        winner: normName(r?.winner),
-        createdAt: Number(r?.createdAt ?? Date.now()),
-      }));
+        const rebuys: RebuyMatch[] = (s?.rebuys ?? []).map((r: any) => ({
+          id: normName(r?.id) || uid("rb"),
+          buyer: normName(r?.buyer),
+          a: normName(r?.a),
+          b: normName(r?.b),
+          winner: normName(r?.winner),
+          createdAt: Number(r?.createdAt ?? Date.now()),
+        }));
 
-      return {
-        id: normName(s?.id) || uid("s"),
-        number: clampInt(Number(s?.number ?? i + 1), 1, 999),
-        dateLabel: normName(s?.dateLabel) || undefined,
-        createdAt: Number(s?.createdAt ?? Date.now()),
-        pools: { A: poolsA, B: poolsB },
-        matches: matches.sort((a, b) => a.order - b.order),
-        rebuys: rebuys.sort((a, b) => a.createdAt - b.createdAt),
-        qualifiersOverride:
-          s?.qualifiersOverride && typeof s.qualifiersOverride === "object"
-            ? {
-                A1: normName(s.qualifiersOverride.A1),
-                A2: normName(s.qualifiersOverride.A2),
-                B1: normName(s.qualifiersOverride.B1),
-                B2: normName(s.qualifiersOverride.B2),
-              }
-            : undefined,
+        return {
+          id: normName(s?.id) || uid("s"),
+          number: clampInt(Number(s?.number ?? idx + 1), 1, 999),
+          dateLabel: normName(s?.dateLabel) || undefined,
+          createdAt: Number(s?.createdAt ?? Date.now()),
+          pools: { A: poolsA, B: poolsB },
+          matches: matches.sort((a, b) => a.order - b.order),
+          rebuys: rebuys.sort((a, b) => a.createdAt - b.createdAt),
+          qualifiersOverride:
+            s?.qualifiersOverride && typeof s.qualifiersOverride === "object"
+              ? {
+                  A1: normName(s.qualifiersOverride.A1),
+                  A2: normName(s.qualifiersOverride.A2),
+                  B1: normName(s.qualifiersOverride.B1),
+                  B2: normName(s.qualifiersOverride.B2),
+                }
+              : undefined,
+        };
+      });
+
+      const inferredPlayers = players.length
+        ? players
+        : uniq(
+            soirees.flatMap((s) => [
+              ...s.pools.A,
+              ...s.pools.B,
+              ...s.matches.flatMap((m) => [m.a, m.b, m.winner]),
+              ...s.rebuys.flatMap((r) => [r.buyer, r.a, r.b, r.winner]),
+            ])
+          ).filter(isNonEmptyString);
+
+      const seasonSan: Season = {
+        id: normName(season?.id) || uid("season"),
+        name: normName(season?.name) || `Saison ${i + 1}`,
+        players: inferredPlayers,
+        soirees,
       };
-    });
 
-    const inferredPlayers = players.length
-      ? players
-      : uniq(
-          soirees.flatMap((s) => [
-            ...s.pools.A,
-            ...s.pools.B,
-            ...s.matches.flatMap((m) => [m.a, m.b, m.winner]),
-            ...s.rebuys.flatMap((r) => [r.buyer, r.a, r.b, r.winner]),
-          ])
-        ).filter(isNonEmptyString);
-
-    const seasonSan: Season = {
-      id: normName(season.id) || uid("season"),
-      name: normName(season.name) || "Saison 1",
-      players: inferredPlayers,
-      soirees,
+      if (!seasonSan.soirees.length) seasonSan.soirees = [makeEmptySoiree(1)];
+      return seasonSan;
     };
 
-    if (!seasonSan.soirees.length) seasonSan.soirees = [makeEmptySoiree(1)];
+    const seasons = seasonsRaw.length ? seasonsRaw.map(sanitizeSeason) : [makeEmptySeason("Saison 1")];
+    const activeSeasonId = normName(raw.activeSeasonId) || seasons[0].id;
 
     return {
       version: v || VERSION,
-      season: seasonSan,
+      seasons,
+      activeSeasonId,
     };
   } catch {
     return fallback;
@@ -587,7 +604,7 @@ function Select({
 export default function App() {
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState<AppState>(() => loadState());
-  const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "PARAMS">("SOIREE");
+  const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "PARAMS" | "SAISONS">("SOIREE");
   const [compactMode, setCompactMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem("dl_compact_mode") === "1";
@@ -595,17 +612,27 @@ export default function App() {
       return false;
     }
   });
+  const [cardsMode, setCardsMode] = useState<boolean>(true);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [showExport, setShowExport] = useState(false);
   const [exportText, setExportText] = useState("");
   const [newPlayerName, setNewPlayerName] = useState("");
+  const [bulkPlayersText, setBulkPlayersText] = useState("");
+  const [editingPlayer, setEditingPlayer] = useState<string | null>(null);
+  const [editingPlayerName, setEditingPlayerName] = useState("");
+  const [newSeasonName, setNewSeasonName] = useState("");
+  const [copyPlayersForNewSeason, setCopyPlayersForNewSeason] = useState(true);
   const [selectedSoireeNumber, setSelectedSoireeNumber] = useState<number>(() => {
-    const max = Math.max(...state.season.soirees.map((s) => s.number));
+    const max = Math.max(...currentSeasons[0].soirees.map((s) => s.number));
     return max;
   });
 
   const savingRef = useRef<number | null>(null);
+
+  const currentSeason = useMemo(() => {
+    return currentSeasons.find((s) => s.id === state.activeSeasonId) ?? currentSeasons[0];
+  }, [currentSeasons, state.activeSeasonId]);
 
   useEffect(() => {
     if (savingRef.current) window.clearTimeout(savingRef.current);
@@ -624,27 +651,33 @@ export default function App() {
   }, [compactMode]);
 
   useEffect(() => {
-    const exists = state.season.soirees.some((s) => s.number === selectedSoireeNumber);
+    if (!state.seasons.find((s) => s.id === state.activeSeasonId)) {
+      setState((prev) => ({ ...prev, activeSeasonId: prev.seasons[0]?.id ?? prev.activeSeasonId }));
+    }
+  }, [state.activeSeasonId, state.seasons]);
+
+  useEffect(() => {
+    const exists = currentSeason.soirees.some((s) => s.number === selectedSoireeNumber);
     if (!exists) {
-      const max = Math.max(...state.season.soirees.map((s) => s.number));
+      const max = Math.max(...currentSeason.soirees.map((s) => s.number));
       setSelectedSoireeNumber(max);
     }
-  }, [state.season.soirees, selectedSoireeNumber]);
+  }, [currentSeason.soirees, selectedSoireeNumber]);
 
-  const seasonStats = useMemo(() => aggregateSeasonStats(state.season), [state.season]);
-  const jackpotEUR = useMemo(() => computeJackpotEUR(state.season), [state.season]);
-  const streaks = useMemo(() => computeWinStreaks(state.season), [state.season]);
-  const h2h = useMemo(() => computeHeadToHead(state.season), [state.season]);
+  const seasonStats = useMemo(() => aggregateSeasonStats(currentSeason), [currentSeason]);
+  const jackpotEUR = useMemo(() => computeJackpotEUR(currentSeason), [currentSeason]);
+  const streaks = useMemo(() => computeWinStreaks(currentSeason), [currentSeason]);
+  const h2h = useMemo(() => computeHeadToHead(currentSeason), [currentSeason]);
 
   const playerColors = useMemo(() => {
     const map = new Map<string, string>();
-    state.season.players.forEach((p, i) => map.set(p, PALETTE[i % PALETTE.length]));
+    currentSeason.players.forEach((p, i) => map.set(p, PALETTE[i % PALETTE.length]));
     return map;
-  }, [state.season.players]);
+  }, [currentSeason.players]);
 
   const currentSoiree = useMemo(() => {
-    return state.season.soirees.find((s) => s.number === selectedSoireeNumber) ?? state.season.soirees[0];
-  }, [state.season.soirees, selectedSoireeNumber]);
+    return currentSeason.soirees.find((s) => s.number === selectedSoireeNumber) ?? currentSeason.soirees[0];
+  }, [currentSeason.soirees, selectedSoireeNumber]);
 
 
   const currentPoolStandings = useMemo(() => {
@@ -654,7 +687,7 @@ export default function App() {
       const players = currentSoiree.pools[pool];
       const relevant = poolMatches.filter((m) => m.pool === pool);
 
-      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, state.season);
+      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
 
       const rows = players.map((p) => ({
         name: p,
@@ -668,14 +701,17 @@ export default function App() {
     };
 
     return { A: calcPool("A"), B: calcPool("B") };
-  }, [currentSoiree.matches, currentSoiree.pools, currentSoiree.number, state.season]);
+  }, [currentSoiree.matches, currentSoiree.pools, currentSoiree.number, currentSeason]);
 
   const allSoireeNumbers = useMemo(() => {
-    return [...state.season.soirees].map((s) => s.number).sort((a, b) => a - b);
-  }, [state.season.soirees]);
+    return [...currentSeason.soirees].map((s) => s.number).sort((a, b) => a - b);
+  }, [currentSeason.soirees]);
 
   function updateSeason(mutator: (season: Season) => Season) {
-    setState((prev) => ({ ...prev, season: mutator(prev.season) }));
+    setState((prev) => {
+      const seasons = prev.seasons.map((s) => (s.id === prev.activeSeasonId ? mutator(s) : s));
+      return { ...prev, seasons };
+    });
   }
 
   function addPlayer(nameRaw: string) {
@@ -684,6 +720,21 @@ export default function App() {
     updateSeason((season) => {
       if (season.players.includes(name)) return season;
       return { ...season, players: [...season.players, name] };
+    });
+  }
+
+  function addPlayersFromBulk(text: string) {
+    const names = uniq(
+      text
+        .split(/[\n,;]/g)
+        .map((x) => normName(x))
+        .filter(isNonEmptyString)
+    );
+    if (!names.length) return;
+    updateSeason((season) => {
+      const merged = [...season.players];
+      for (const n of names) if (!merged.includes(n)) merged.push(n);
+      return { ...season, players: merged };
     });
   }
 
@@ -714,6 +765,79 @@ export default function App() {
     });
   }
 
+  function renamePlayer(oldName: string, newNameRaw: string) {
+    const newName = normName(newNameRaw);
+    if (!newName || newName === oldName) return;
+    updateSeason((season) => {
+      if (season.players.includes(newName)) return season;
+      const players = season.players.map((p) => (p === oldName ? newName : p));
+      const soirees = season.soirees.map((s) => ({
+        ...s,
+        pools: {
+          A: s.pools.A.map((p) => (p === oldName ? newName : p)),
+          B: s.pools.B.map((p) => (p === oldName ? newName : p)),
+        },
+        matches: s.matches.map((m) => ({
+          ...m,
+          a: m.a === oldName ? newName : m.a,
+          b: m.b === oldName ? newName : m.b,
+          winner: m.winner === oldName ? newName : m.winner,
+        })),
+        rebuys: s.rebuys.map((r) => ({
+          ...r,
+          buyer: r.buyer === oldName ? newName : r.buyer,
+          a: r.a === oldName ? newName : r.a,
+          b: r.b === oldName ? newName : r.b,
+          winner: r.winner === oldName ? newName : r.winner,
+        })),
+      }));
+      return { ...season, players, soirees };
+    });
+  }
+
+  function addSeason() {
+    setState((prev) => {
+      const name = normName(newSeasonName) || `Saison ${prev.seasons.length + 1}`;
+      const season = makeEmptySeason(name);
+      if (copyPlayersForNewSeason) season.players = [...currentSeason.players];
+      return {
+        ...prev,
+        seasons: [...prev.seasons, season],
+        activeSeasonId: season.id,
+      };
+    });
+    setSelectedSoireeNumber(1);
+    setNewSeasonName("");
+    setTab("SOIREE");
+  }
+
+  function setActiveSeason(id: string) {
+    setState((prev) => {
+      const season = prev.seasons.find((s) => s.id === id) ?? prev.seasons[0];
+      const max = Math.max(...season.soirees.map((s) => s.number));
+      setSelectedSoireeNumber(max);
+      return { ...prev, activeSeasonId: id };
+    });
+  }
+
+  function renameSeason(id: string, nameRaw: string) {
+    const name = normName(nameRaw);
+    if (!name) return;
+    setState((prev) => ({
+      ...prev,
+      seasons: prev.seasons.map((s) => (s.id === id ? { ...s, name } : s)),
+    }));
+  }
+
+  function deleteSeason(id: string) {
+    setState((prev) => {
+      if (prev.seasons.length <= 1) return prev;
+      const seasons = prev.seasons.filter((s) => s.id !== id);
+      const activeSeasonId = prev.activeSeasonId === id ? seasons[0].id : prev.activeSeasonId;
+      return { ...prev, seasons, activeSeasonId };
+    });
+  }
+
   function setQualifiersOverride(patch: Partial<NonNullable<Soiree["qualifiersOverride"]>>) {
     updateSeason((season) => {
       const soirees = season.soirees.map((s) => {
@@ -738,8 +862,8 @@ export default function App() {
 
   function exportSeasonFile() {
     const payload = JSON.stringify(state, null, 2);
-    const safeName = (state.season.name || "Saison").split(" ").join("_");
-    const filename = "dark-league_" + safeName + "_soirees-" + String(state.season.soirees.length) + ".json";
+    const safeName = (currentSeason.name || "Saison").split(" ").join("_");
+    const filename = "dark-league_" + safeName + "_soirees-" + String(currentSeason.soirees.length) + ".json";
 
     try {
       downloadTextFile(filename, payload);
@@ -767,7 +891,8 @@ export default function App() {
       const parsed = JSON.parse(text);
       const next = sanitizeState(parsed);
       setState(next);
-      const max = Math.max(...next.season.soirees.map((s) => s.number));
+      const active = next.seasons.find((s) => s.id === next.activeSeasonId) ?? next.seasons[0];
+      const max = Math.max(...active.soirees.map((s) => s.number));
       setSelectedSoireeNumber(max);
       setTab("SOIREE");
       setShowImport(false);
@@ -782,7 +907,7 @@ export default function App() {
   }
 
   function startNewSoiree() {
-    if (state.season.players.length < 2) {
+    if (currentSeason.players.length < 2) {
       alert("Ajoute d’abord les joueurs (au moins 2).");
       return;
     }
@@ -874,7 +999,7 @@ export default function App() {
     });
 
     setTimeout(() => {
-      const max = Math.max(...state.season.soirees.map((s) => s.number)) + 1;
+      const max = Math.max(...currentSeason.soirees.map((s) => s.number)) + 1;
       setSelectedSoireeNumber(max);
       setTab("SOIREE");
     }, 0);
@@ -915,13 +1040,31 @@ export default function App() {
     });
   }
 
+  function swapMatchPlayers(matchId: string) {
+    updateSeason((season) => {
+      const soirees = season.soirees.map((s) => {
+        if (s.number !== currentSoiree.number) return s;
+        const matches = s.matches.map((m) => {
+          if (m.id !== matchId) return m;
+          const a = m.b;
+          const b = m.a;
+          const winner =
+            m.winner === m.a ? m.b : m.winner === m.b ? m.a : m.winner;
+          return { ...m, a, b, winner };
+        });
+        return { ...s, matches };
+      });
+      return { ...season, soirees };
+    });
+  }
+
   function recalcFinalsFromPools() {
     const poolMatches = currentSoiree.matches.filter((m) => m.phase === "POULE");
 
     const calcPool = (pool: "A" | "B") => {
       const players = currentSoiree.pools[pool];
       const relevant = poolMatches.filter((m) => m.pool === pool);
-      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, state.season);
+      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
       const rows = players.map((p) => ({
         name: p,
         pts: pts.get(p) ?? 0,
@@ -1055,8 +1198,8 @@ export default function App() {
     const third = normName(pfinal?.winner ?? "");
 
     if (!wFinal || !second || !third) {
-      const { pts, wins } = computePointsFromMatches(currentSoiree.matches, [], currentSoiree.number, state.season);
-      const rows = state.season.players.map((p) => ({
+      const { pts, wins } = computePointsFromMatches(currentSoiree.matches, [], currentSoiree.number, currentSeason);
+      const rows = currentSeason.players.map((p) => ({
         name: p,
         pts: pts.get(p) ?? 0,
         wins: wins.get(p) ?? 0,
@@ -1076,12 +1219,12 @@ export default function App() {
       third,
       provisional: false as const,
     };
-  }, [currentSoiree.matches, currentSoiree.number, state.season]);
+  }, [currentSoiree.matches, currentSoiree.number, currentSeason]);
 
 
   const totalGainsEUR = useMemo(() => {
     const totals = new Map<string, number>();
-    for (const p of state.season.players) totals.set(p, 0);
+    for (const p of currentSeason.players) totals.set(p, 0);
 
     const podiumFromSoiree = (s: Soiree) => {
       const final = s.matches.find((m) => m.phase === "FINAL");
@@ -1095,8 +1238,8 @@ export default function App() {
       const third = normName(pfinal?.winner ?? "");
 
       if (!wFinal || !second || !third) {
-        const { pts, wins } = computePointsFromMatches(s.matches, [], s.number, state.season);
-        const rows = state.season.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
+        const { pts, wins } = computePointsFromMatches(s.matches, [], s.number, currentSeason);
+        const rows = currentSeason.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
         rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
         return { first: rows[0]?.name ?? "", second: rows[1]?.name ?? "", third: rows[2]?.name ?? "" };
       }
@@ -1104,17 +1247,17 @@ export default function App() {
       return { first: wFinal, second, third };
     };
 
-    for (const s of state.season.soirees) {
+    for (const s of currentSeason.soirees) {
       const { first, second, third } = podiumFromSoiree(s);
       if (first) totals.set(first, (totals.get(first) ?? 0) + MONEY.podiumEUR.first);
       if (second) totals.set(second, (totals.get(second) ?? 0) + MONEY.podiumEUR.second);
       if (third) totals.set(third, (totals.get(third) ?? 0) + MONEY.podiumEUR.third);
     }
 
-    const out = state.season.players.map((p) => ({ player: p, eur: totals.get(p) ?? 0 }));
+    const out = currentSeason.players.map((p) => ({ player: p, eur: totals.get(p) ?? 0 }));
     out.sort((a, b) => b.eur - a.eur || a.player.localeCompare(b.player));
     return out;
-  }, [state.season.players, state.season.soirees]);
+  }, [currentSeason.players, currentSeason.soirees]);
 
   return (
     <div className="min-h-screen bg-[#0b0f17] text-white">
@@ -1126,14 +1269,14 @@ export default function App() {
               <div>
                 <h1 className="text-lg font-bold sm:text-xl">DARTS LEAGUE — App (local)</h1>
                 <div className="mt-0.5 text-xs sm:text-sm text-white/70">
-                  {state.season.name} • Sauvegarde locale (Safari)
+                  {currentSeason.name} • Sauvegarde locale (Safari)
                 </div>
               </div>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Pill color="#22c55e">Jackpot: {formatEUR(jackpotEUR)}</Pill>
-              <Pill>Joueurs: {state.season.players.length}</Pill>
-              <Pill>Soirées: {state.season.soirees.length}</Pill>
+              <Pill>Joueurs: {currentSeason.players.length}</Pill>
+              <Pill>Soirées: {currentSeason.soirees.length}</Pill>
             </div>
           </div>
 
@@ -1155,6 +1298,7 @@ export default function App() {
               ["HISTO", "Historique"],
               ["REBUY", "Re-buy"],
               ["H2H", "Confrontations"],
+              ["SAISONS", "Saisons"],
               ["PARAMS", "Paramètres"],
             ] as const
           ).map(([k, label]) => (
@@ -1179,6 +1323,7 @@ export default function App() {
                 ["HISTO", "Historique"],
                 ["REBUY", "Re-buy"],
                 ["H2H", "H2H"],
+                ["SAISONS", "Saisons"],
                 ["PARAMS", "Params"],
               ] as const
             ).map(([k, label]) => (
@@ -1195,7 +1340,7 @@ export default function App() {
           </div>
         </div>
 
-        {tab !== "PARAMS" && (
+        {tab !== "PARAMS" && tab !== "SAISONS" && (
           <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-white/70">Soirée sélectionnée</div>
             <div className="w-full sm:w-56">
@@ -1225,20 +1370,26 @@ export default function App() {
                     <Button variant="ghost" onClick={() => setCompactMode((v) => !v)}>
                       {compactMode ? "Mode détaillé" : "Mode compact"}
                     </Button>
+                    <Button variant="ghost" onClick={() => setCardsMode((v) => !v)}>
+                      {cardsMode ? "Vue tableau" : "Vue cartes"}
+                    </Button>
                   </div>
                 }
               >
-                <div className="md:hidden space-y-3">
+                <div className={`space-y-3 ${cardsMode ? "block" : "md:hidden"}`}>
                   {currentSoiree.matches
                     .slice()
                     .sort((a, b) => a.order - b.order)
                     .map((m) => {
-                      const options = [m.a, m.b].map(normName).filter(Boolean);
                       const winner = normName(m.winner);
                       const bonus = m.checkout100 ? 1 : 0;
                       const basePts = m.phase === "PFINAL" ? 1 : 2;
                       const ptsA = winner && winner === m.a ? basePts + bonus : 0;
                       const ptsB = winner && winner === m.b ? basePts + bonus : 0;
+                      const pickWinner = (name: string) => {
+                        setMatchWinner(m.id, name);
+                        if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
+                      };
 
                       if (compactMode) {
                         return (
@@ -1262,16 +1413,24 @@ export default function App() {
                               </div>
                             </div>
                             <div className="mt-2 grid grid-cols-1 gap-2">
-                              <Select
-                                value={winner}
-                                onChange={(v) => {
-                                  setMatchWinner(m.id, v);
-                                  if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
-                                }}
-                                options={options}
-                                placeholder="Vainqueur…"
-                                disabled={!m.a || !m.b}
-                              />
+                              <div className="grid grid-cols-2 gap-2">
+                                <Button variant={winner === m.a ? "primary" : "ghost"} onClick={() => pickWinner(m.a)} disabled={!m.a || !m.b}>
+                                  {m.a || "A"}
+                                </Button>
+                                <Button variant={winner === m.b ? "primary" : "ghost"} onClick={() => pickWinner(m.b)} disabled={!m.a || !m.b}>
+                                  {m.b || "B"}
+                                </Button>
+                              </div>
+                              <div className="flex items-center justify-between text-xs text-white/60">
+                                <span>{m.format} • {m.bo} • {m.maxTurns}t</span>
+                                <button
+                                  className="text-white/70 underline"
+                                  onClick={() => swapMatchPlayers(m.id)}
+                                  disabled={!m.a && !m.b}
+                                >
+                                  Inverser A/B
+                                </button>
+                              </div>
                             </div>
                             <div className="mt-2 flex items-center justify-between text-xs text-white/60">
                               <div>Pts</div>
@@ -1309,16 +1468,21 @@ export default function App() {
                             {m.format} • {m.bo} • {m.maxTurns}t
                           </div>
                           <div className="mt-3 grid grid-cols-1 gap-2">
-                            <Select
-                              value={winner}
-                              onChange={(v) => {
-                                setMatchWinner(m.id, v);
-                                if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
-                              }}
-                              options={options}
-                              placeholder="Vainqueur…"
-                              disabled={!m.a || !m.b}
-                            />
+                            <div className="grid grid-cols-2 gap-2">
+                              <Button variant={winner === m.a ? "primary" : "ghost"} onClick={() => pickWinner(m.a)} disabled={!m.a || !m.b}>
+                                {m.a || "A"}
+                              </Button>
+                              <Button variant={winner === m.b ? "primary" : "ghost"} onClick={() => pickWinner(m.b)} disabled={!m.a || !m.b}>
+                                {m.b || "B"}
+                              </Button>
+                            </div>
+                            <button
+                              className="text-xs text-white/70 underline"
+                              onClick={() => swapMatchPlayers(m.id)}
+                              disabled={!m.a && !m.b}
+                            >
+                              Inverser A/B
+                            </button>
                             <label className="inline-flex items-center gap-2 text-xs text-white/80">
                               <input
                                 type="checkbox"
@@ -1343,7 +1507,7 @@ export default function App() {
                     })}
                 </div>
 
-                <div className="hidden md:block overflow-x-auto">
+                <div className={`${cardsMode ? "hidden" : "hidden md:block"} overflow-x-auto`}>
                   <table className="w-full min-w-[900px] text-left text-sm">
                     <thead>
                       <tr className="text-white/70">
@@ -1671,10 +1835,10 @@ export default function App() {
               <div className="text-xs text-white/60 mb-2">Mini-graph: barres ASCII (lisible sans librairie)</div>
               <div className="space-y-2">
                 {allSoireeNumbers.map((n) => {
-                  const so = state.season.soirees.find((s) => s.number === n)!;
-                  const { pts } = computePointsFromMatches(so.matches, so.rebuys, so.number, state.season);
-                  const top = Math.max(...state.season.players.map((p) => pts.get(p) ?? 0), 1);
-                  const topPlayer = state.season.players
+                  const so = currentSeason.soirees.find((s) => s.number === n)!;
+                  const { pts } = computePointsFromMatches(so.matches, so.rebuys, so.number, currentSeason);
+                  const top = Math.max(...currentSeason.players.map((p) => pts.get(p) ?? 0), 1);
+                  const topPlayer = currentSeason.players
                     .map((p) => ({ p, v: pts.get(p) ?? 0 }))
                     .sort((a, b) => b.v - a.v || a.p.localeCompare(b.p))[0];
                   const width = Math.round((topPlayer.v / top) * 24);
@@ -1700,12 +1864,12 @@ export default function App() {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Section title="Historique des soirées">
               <div className="space-y-2">
-                {state.season.soirees
+                {currentSeason.soirees
                   .slice()
                   .sort((a, b) => b.number - a.number)
                   .map((s) => {
-                    const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, state.season);
-                    const rows = state.season.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
+                    const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
+                    const rows = currentSeason.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
                     rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
                     const podium = rows.slice(0, 3);
                     return (
@@ -1804,7 +1968,7 @@ export default function App() {
                 ) : (
                   <div className="space-y-3">
                     {currentSoiree.rebuys.map((r, idx) => {
-                      const players = state.season.players;
+                      const players = currentSeason.players;
                       const buyer = normName(r.buyer);
                       const a = normName(r.a);
                       const b = normName(r.b);
@@ -1820,7 +1984,7 @@ export default function App() {
                         }
 
                         let doneBefore = 0;
-                        for (const sx of state.season.soirees) {
+                        for (const sx of currentSeason.soirees) {
                           if (sx.number >= currentSoiree.number) continue;
                           for (const rb of sx.rebuys) {
                             if (normName(rb.buyer) === buyerN && normName(rb.winner)) doneBefore++;
@@ -1929,10 +2093,10 @@ export default function App() {
               <Section title="Jackpot (détail)">
                 <div className="text-sm text-white/70 space-y-1">
                   <div>
-                    Soirées jouées : <span className="font-semibold text-white">{state.season.soirees.length}</span>
+                    Soirées jouées : <span className="font-semibold text-white">{currentSeason.soirees.length}</span>
                   </div>
                   <div>
-                    Rebuys total : <span className="font-semibold text-white">{state.season.soirees.reduce((s, x) => s + x.rebuys.length, 0)}</span>
+                    Rebuys total : <span className="font-semibold text-white">{currentSeason.soirees.reduce((s, x) => s + x.rebuys.length, 0)}</span>
                   </div>
                   <div className="mt-2">
                     Jackpot actuel : <span className="font-extrabold text-white">{formatEUR(jackpotEUR)}</span>
@@ -2008,6 +2172,69 @@ export default function App() {
           </Section>
         )}
 
+        {tab === "SAISONS" && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Section title="Saisons">
+              <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-[1fr,auto]">
+                <input
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
+                  placeholder="Nom de la nouvelle saison…"
+                  value={newSeasonName}
+                  onChange={(e) => setNewSeasonName(e.target.value)}
+                />
+                <Button variant="primary" onClick={() => addSeason()}>
+                  Créer
+                </Button>
+              </div>
+              <label className="mb-3 inline-flex items-center gap-2 text-xs text-white/70">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-white/20 bg-black"
+                  checked={copyPlayersForNewSeason}
+                  onChange={(e) => setCopyPlayersForNewSeason(e.target.checked)}
+                />
+                Copier les joueurs de la saison actuelle
+              </label>
+
+              <div className="space-y-2">
+                {state.seasons.map((s, idx) => (
+                  <div key={s.id} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white/60 w-6">{idx + 1}.</span>
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-sm text-white outline-none focus:border-white/25"
+                          defaultValue={s.name}
+                          onBlur={(e) => renameSeason(s.id, e.target.value)}
+                        />
+                        {s.id === currentSeason.id && <Pill color="#22c55e">Active</Pill>}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Pill>Joueurs: {s.players.length}</Pill>
+                        <Pill>Soirées: {s.soirees.length}</Pill>
+                        <Button variant="ghost" onClick={() => setActiveSeason(s.id)}>
+                          Ouvrir
+                        </Button>
+                        <Button variant="danger" onClick={() => deleteSeason(s.id)} disabled={state.seasons.length <= 1}>
+                          Supprimer
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Section>
+
+            <Section title="Conseils">
+              <div className="text-sm text-white/70 space-y-2">
+                <div>• Crée une saison par année ou par ligue.</div>
+                <div>• Tu peux copier les joueurs pour aller plus vite.</div>
+                <div>• Les saisons restent indépendantes (stats, soirées, rebuys).</div>
+              </div>
+            </Section>
+          </div>
+        )}
+
         {tab === "PARAMS" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Section title="Joueurs (saison en cours)">
@@ -2037,21 +2264,76 @@ export default function App() {
                   Ajouter
                 </Button>
               </div>
+              <div className="mb-3 grid grid-cols-1 gap-2">
+                <textarea
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
+                  rows={3}
+                  placeholder="Ajouter plusieurs joueurs (un par ligne ou séparés par virgule)…"
+                  value={bulkPlayersText}
+                  onChange={(e) => setBulkPlayersText(e.target.value)}
+                />
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    addPlayersFromBulk(bulkPlayersText);
+                    setBulkPlayersText("");
+                  }}
+                >
+                  Ajouter la liste
+                </Button>
+              </div>
               <div className="space-y-2">
-                {state.season.players.length === 0 && (
+                {currentSeason.players.length === 0 && (
                   <div className="text-sm text-white/60">Aucun joueur pour l’instant. Ajoute-les ci-dessus.</div>
                 )}
-                {state.season.players.map((p, idx) => (
+                {currentSeason.players.map((p, idx) => (
                   <div
                     key={p}
                     className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2"
                   >
                     <div className="flex items-center gap-2">
                       <span className="h-3 w-3 rounded-full" style={{ background: playerColors.get(p) ?? "#ffffff33" }} />
-                      <span className="font-semibold">{p}</span>
+                      {editingPlayer === p ? (
+                        <input
+                          className="w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-sm text-white outline-none focus:border-white/25"
+                          value={editingPlayerName}
+                          onChange={(e) => setEditingPlayerName(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              renamePlayer(p, editingPlayerName);
+                              setEditingPlayer(null);
+                              setEditingPlayerName("");
+                            }
+                          }}
+                        />
+                      ) : (
+                        <span className="font-semibold">{p}</span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-white/60">Couleur #{idx + 1}</span>
+                      {editingPlayer === p ? (
+                        <Button
+                          variant="primary"
+                          onClick={() => {
+                            renamePlayer(p, editingPlayerName);
+                            setEditingPlayer(null);
+                            setEditingPlayerName("");
+                          }}
+                        >
+                          Valider
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          onClick={() => {
+                            setEditingPlayer(p);
+                            setEditingPlayerName(p);
+                          }}
+                        >
+                          Renommer
+                        </Button>
+                      )}
                       <Button variant="danger" onClick={() => removePlayer(p)}>
                         Supprimer
                       </Button>
