@@ -727,11 +727,10 @@ export default function App() {
     return [...currentSeason.soirees].map((s: Soiree) => s.number).sort((a: number, b: number) => a - b);
   }, [currentSeason.soirees]);
 
-  const tvTabs: Array<"SOIREE" | "CLASSEMENT" | "HISTO" | "H2H"> = ["SOIREE", "CLASSEMENT", "HISTO", "H2H"];
+  const tvTabs: Array<"SOIREE" | "CLASSEMENT" | "H2H"> = ["SOIREE", "CLASSEMENT", "H2H"];
   const tvLabels: Record<string, string> = {
     SOIREE: "Soirée",
     CLASSEMENT: "Classement",
-    HISTO: "Historique",
     H2H: "Confrontations",
   };
 
@@ -1481,6 +1480,7 @@ export default function App() {
           </div>
         )}
 
+        <div className={`tv-stage ${tvMode ? "tv-animate" : ""}`} key={tvMode ? tab : "static"}>
         {tab === "SOIREE" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-2">
@@ -2650,6 +2650,8 @@ export default function App() {
             </Section>
           </div>
         )}
+
+        </div>
 
         <div className="mt-8 text-center text-xs text-white/40">Darts League — app locale • v{VERSION}</div>
       </div>
