@@ -1594,9 +1594,9 @@ export default function App() {
               ["CLASSEMENT", "Classement"],
               ["HISTO", "Historique"],
               ["REBUY", "Re-buy"],
-              ["FINANCES", "Finances"],
               ["H2H", "Confrontations"],
               ["SAISONS", "Saisons"],
+              ["FINANCES", "Finances"],
               ["PARAMS", "Paramètres"],
             ] as const
           ).map(([k, label]) => (
@@ -1620,9 +1620,9 @@ export default function App() {
                 ["CLASSEMENT", "Classement"],
                 ["HISTO", "Historique"],
                 ["REBUY", "Re-buy"],
-                ["FINANCES", "Finances"],
                 ["H2H", "H2H"],
                 ["SAISONS", "Saisons"],
+                ["FINANCES", "Finances"],
                 ["PARAMS", "Params"],
               ] as const
             ).map(([k, label]) => (
