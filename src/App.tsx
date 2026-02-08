@@ -1055,7 +1055,8 @@ export default function App() {
         const matches = s.matches.map((m: CoreMatch) => {
           if (m.id !== matchId) return m;
           if (!m.a || !m.b) return { ...m, checkoutBy: "", checkout100: false };
-          return { ...m, checkoutBy, checkout100: Boolean(checkoutBy) };
+          const by = checkoutBy as "" | "A" | "B";
+          return { ...m, checkoutBy: by, checkout100: Boolean(by) };
         });
         return { ...s, matches };
       });
