@@ -1495,7 +1495,7 @@ export default function App() {
                 <div
                   key={r.name}
                   className={`rounded-2xl border border-white/10 bg-black/40 p-5 shadow-[0_30px_80px_rgba(0,0,0,0.35)] ${
-                    idx === 0 ? "ring-2 ring-emerald-400/40" : ""
+                    idx === 0 ? "ring-2 ring-emerald-400/40 tv-spotlight" : ""
                   }`}
                 >
                   <div className="flex items-center justify-between">

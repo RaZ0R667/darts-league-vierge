@@ -84,6 +84,20 @@ body {
   100% { opacity: 1; transform: translateY(0) scale(1); }
 }
 
+.tv-spotlight {
+  position: relative;
+  overflow: hidden;
+}
+
+.tv-spotlight::before {
+  content: "";
+  position: absolute;
+  inset: -20% -10% auto -10%;
+  height: 120%;
+  background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.18), transparent 55%);
+  pointer-events: none;
+}
+
 .winner-anim {
   position: relative;
   overflow: hidden;
