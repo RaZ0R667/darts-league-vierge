@@ -736,7 +736,7 @@ export default function App() {
 
   useEffect(() => {
     if (!tvMode) return;
-    const idx = tvTabs.indexOf(tab as "SOIREE" | "CLASSEMENT" | "HISTO" | "H2H");
+    const idx = tvTabs.indexOf(tab as (typeof tvTabs)[number]);
     setTvIndex(idx >= 0 ? idx : 0);
   }, [tvMode, tab]);
 
