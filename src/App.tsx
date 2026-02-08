@@ -1294,6 +1294,46 @@ export default function App() {
   }, [currentSeason.players, currentSeason.soirees]);
 
   const rankingTimeline = useMemo(() => {
+    const players = currentSeason.players;
+    const soirees = [...currentSeason.soirees].sort((a: Soiree, b: Soiree) => a.number - b.number);
+    const totals = new Map<string, { pts: number; wins: number; bonus: number }>();
+    players.forEach((p: string) => totals.set(p, { pts: 0, wins: 0, bonus: 0 }));
+
+    const series = new Map<string, number[]>();
+    players.forEach((p: string) => series.set(p, []));
+
+    for (const s of soirees) {
+      const { pts, wins, bonus } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
+      for (const p of players) {
+        const t = totals.get(p)!;
+        totals.set(p, {
+          pts: t.pts + (pts.get(p) ?? 0),
+          wins: t.wins + (wins.get(p) ?? 0),
+          bonus: t.bonus + (bonus.get(p) ?? 0),
+        });
+      }
+
+      const table = players
+        .map((p: string) => ({ name: p, ...(totals.get(p) ?? { pts: 0, wins: 0, bonus: 0 }) }))
+        .sort(
+          (
+            a: { name: string; pts: number; wins: number; bonus: number },
+            b: { name: string; pts: number; wins: number; bonus: number }
+          ) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name)
+        );
+
+      table.forEach((row: { name: string }, idx: number) => {
+        series.get(row.name)!.push(idx + 1);
+      });
+    }
+
+    return {
+      labels: soirees.map((s: Soiree) => s.number),
+      series: players.map((p: string) => ({ player: p, ranks: series.get(p) ?? [] })),
+    };
+  }, [currentSeason.players, currentSeason.soirees]);
+
+  const rankingTimeline = useMemo(() => {
     const soireesAsc = [...currentSeason.soirees].sort((a: Soiree, b: Soiree) => a.number - b.number);
     const players = currentSeason.players;
     const pts = new Map<string, number>();
@@ -1879,52 +1919,47 @@ export default function App() {
               </div>
             </Section>
 
-            <Section title="Évolution du classement">
+            <Section title="Évolution du classement (global)">
               {rankingTimeline.soireeNumbers.length === 0 ? (
                 <div className="text-sm text-white/60">Aucune soirée jouée.</div>
               ) : (
-                <div className="space-y-3">
-                  {currentSeason.players.map((p: string) => {
-                    const ranks = rankingTimeline.ranksByPlayer[p] ?? [];
-                    const maxRank = Math.max(1, ...ranks);
-                    const points = ranks
-                      .map((r, i) => {
-                        const x = (i / Math.max(1, ranks.length - 1)) * 100;
-                        const y = ((r - 1) / Math.max(1, maxRank - 1)) * 100;
-                        return `${x},${y}`;
-                      })
-                      .join(" ");
-                    return (
-                      <div key={p} className="rounded-xl border border-white/10 bg-black/30 p-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(p) ?? "#ffffff33" }} />
-                            <span className="font-semibold">{p}</span>
-                          </div>
-                          <div className="text-xs text-white/60">
-                            Rang : {ranks.length ? ranks[ranks.length - 1] : "—"}
-                          </div>
-                        </div>
-                        <div className="mt-2">
-                          <svg viewBox="0 0 100 100" className="h-8 w-full">
-                            <polyline
-                              fill="none"
-                              stroke={playerColors.get(p) ?? "#fff"}
-                              strokeWidth="3"
-                              points={points}
-                            />
-                          </svg>
-                        </div>
-                        <div className="mt-1 text-[11px] text-white/60">
-                          {rankingTimeline.soireeNumbers.map((n, i) => (
-                            <span key={n} className="mr-2">
-                              S{n}:{ranks[i] ?? "—"}
-                            </span>
-                          ))}
-                        </div>
+                <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+                  <div className="text-xs text-white/60 mb-2">Rang (1 en haut) par soirée</div>
+                  <div className="w-full overflow-x-auto">
+                    <svg viewBox="0 0 100 100" className="h-36 w-full min-w-[320px]">
+                      <polyline fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1" points="0,0 100,0" />
+                      <polyline fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1" points="0,50 100,50" />
+                      <polyline fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="1" points="0,100 100,100" />
+                      {currentSeason.players.map((p: string) => {
+                        const ranks = rankingTimeline.ranksByPlayer[p] ?? [];
+                        const maxRank = Math.max(1, ...ranks);
+                        const points = ranks
+                          .map((r, i) => {
+                            const x = (i / Math.max(1, ranks.length - 1)) * 100;
+                            const y = ((r - 1) / Math.max(1, maxRank - 1)) * 100;
+                            return `${x},${y}`;
+                          })
+                          .join(" ");
+                        return (
+                          <polyline
+                            key={p}
+                            fill="none"
+                            stroke={playerColors.get(p) ?? "#fff"}
+                            strokeWidth="2.5"
+                            points={points}
+                          />
+                        );
+                      })}
+                    </svg>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    {currentSeason.players.map((p: string) => (
+                      <div key={p} className="inline-flex items-center gap-2 rounded-full bg-white/10 px-2 py-1">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(p) ?? "#ffffff33" }} />
+                        <span>{p}</span>
                       </div>
-                    );
-                  })}
+                    ))}
+                  </div>
                 </div>
               )}
             </Section>
@@ -1971,31 +2006,88 @@ export default function App() {
               </div>
             </Section>
 
-            <Section title="Graph (simple) — Points par soirée">
-              <div className="text-xs text-white/60 mb-2">Mini-graph: barres ASCII (lisible sans librairie)</div>
-              <div className="space-y-2">
-                {allSoireeNumbers.map((n: number) => {
-                  const so = currentSeason.soirees.find((s: Soiree) => s.number === n)!;
-                  const { pts } = computePointsFromMatches(so.matches, so.rebuys, so.number, currentSeason);
-                  const top = Math.max(...currentSeason.players.map((p: string) => pts.get(p) ?? 0), 1);
-                  const topPlayer = currentSeason.players
-                    .map((p: string) => ({ p, v: pts.get(p) ?? 0 }))
-                    .sort((a: { p: string; v: number }, b: { p: string; v: number }) => b.v - a.v || a.p.localeCompare(b.p))[0];
-                  const width = Math.round((topPlayer.v / top) * 24);
-                  return (
-                    <div key={n} className="rounded-xl border border-white/10 bg-black/30 p-3">
-                      <div className="flex items-center justify-between">
-                        <div className="font-semibold">Soirée {n}</div>
-                        <div className="text-white/70">Top: {topPlayer.p} ({topPlayer.v} pts)</div>
-                      </div>
-                      <div className="mt-2 font-mono text-sm">
-                        <span style={{ color: playerColors.get(topPlayer.p) ?? "#fff" }}>{"█".repeat(width)}</span>
-                        <span className="text-white/20">{"█".repeat(24 - width)}</span>
-                      </div>
+            <Section title="Évolution du classement (global)">
+              <div className="text-xs text-white/60 mb-2">Un seul graphique, toutes les soirées et tous les joueurs.</div>
+              {rankingTimeline.labels.length === 0 ? (
+                <div className="text-sm text-white/70">Pas encore de soirées.</div>
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="w-full overflow-x-auto">
+                    <div className="min-w-[640px]">
+                      <svg viewBox="0 0 700 260" className="w-full h-[260px]">
+                        {(() => {
+                          const w = 700;
+                          const h = 260;
+                          const padL = 40;
+                          const padR = 20;
+                          const padT = 20;
+                          const padB = 30;
+                          const playersCount = Math.max(currentSeason.players.length, 1);
+                          const pointsCount = Math.max(rankingTimeline.labels.length, 1);
+                          const xScale = (i: number) => {
+                            if (pointsCount === 1) return (w - padL - padR) / 2 + padL;
+                            return padL + (i / (pointsCount - 1)) * (w - padL - padR);
+                          };
+                          const yScale = (rank: number) => {
+                            if (playersCount === 1) return (h - padT - padB) / 2 + padT;
+                            return padT + ((rank - 1) / (playersCount - 1)) * (h - padT - padB);
+                          };
+
+                          return (
+                            <>
+                              {Array.from({ length: playersCount }).map((_, i) => {
+                                const y = yScale(i + 1);
+                                return (
+                                  <g key={`grid-${i}`}>
+                                    <line x1={padL} y1={y} x2={w - padR} y2={y} stroke="#ffffff1a" />
+                                    <text x={10} y={y + 4} fontSize="10" fill="#ffffff80">
+                                      {i + 1}
+                                    </text>
+                                  </g>
+                                );
+                              })}
+
+                              {rankingTimeline.labels.map((label: number, i: number) => {
+                                const x = xScale(i);
+                                return (
+                                  <text key={`x-${label}`} x={x} y={h - 8} fontSize="10" fill="#ffffff80" textAnchor="middle">
+                                    S{label}
+                                  </text>
+                                );
+                              })}
+
+                              {rankingTimeline.series.map((ser: { player: string; ranks: number[] }) => {
+                                if (ser.ranks.length === 0) return null;
+                                const d = ser.ranks
+                                  .map((rank, i) => `${i === 0 ? "M" : "L"} ${xScale(i)} ${yScale(rank)}`)
+                                  .join(" ");
+                                return (
+                                  <path
+                                    key={ser.player}
+                                    d={d}
+                                    fill="none"
+                                    stroke={playerColors.get(ser.player) ?? "#fff"}
+                                    strokeWidth="2"
+                                  />
+                                );
+                              })}
+                            </>
+                          );
+                        })()}
+                      </svg>
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    {rankingTimeline.series.map((ser: { player: string }) => (
+                      <div key={ser.player} className="inline-flex items-center gap-2 rounded-full bg-black/40 px-2 py-1">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(ser.player) ?? "#ffffff33" }} />
+                        <span className="font-semibold">{ser.player}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </Section>
           </div>
         )}
