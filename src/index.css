@@ -108,19 +108,22 @@ body {
   pointer-events: none;
 }
 
-.tv-spotlight-halo {
-  position: absolute;
-  inset: -25%;
-  border-radius: 999px;
-  filter: blur(18px);
-  opacity: 0.35;
-  pointer-events: none;
-}
-
 @keyframes spotlightPulse {
   0% { opacity: 0.55; transform: translateY(0); }
   50% { opacity: 0.9; transform: translateY(6px); }
   100% { opacity: 0.55; transform: translateY(0); }
+}
+
+.app-shell.tv-mode::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.08;
+  background-image:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08) 1px, transparent 1px, transparent 2px),
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04) 1px, transparent 1px, transparent 3px);
+  mix-blend-mode: soft-light;
 }
 
 .winner-anim {

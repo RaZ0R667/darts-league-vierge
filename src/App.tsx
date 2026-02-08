@@ -1498,12 +1498,6 @@ export default function App() {
                     idx === 0 ? "ring-2 ring-emerald-400/40 tv-spotlight" : ""
                   }`}
                 >
-                  {idx === 0 && (
-                    <span
-                      className="tv-spotlight-halo"
-                      style={{ background: playerColors.get(r.name) ?? "#22c55e" }}
-                    />
-                  )}
                   <div className="flex items-center justify-between">
                     <div className="text-xs uppercase tracking-[0.3em] text-white/50">{label}</div>
                     <div className="text-2xl">{medal}</div>
