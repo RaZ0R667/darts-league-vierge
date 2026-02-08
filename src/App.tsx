@@ -348,6 +348,72 @@ function computeHeadToHead(season: Season) {
   return { players, matrix };
 }
 
+function computeAdvancedStats(season: Season) {
+  const players = season.players;
+  const matches = season.soirees.flatMap((s) => s.matches);
+
+  const wins = new Map<string, number>();
+  const losses = new Map<string, number>();
+  const played = new Map<string, number>();
+  const finals = new Map<string, { finals: number; wins: number }>();
+  const semis = new Map<string, number>();
+
+  players.forEach((p) => {
+    wins.set(p, 0);
+    losses.set(p, 0);
+    played.set(p, 0);
+    finals.set(p, { finals: 0, wins: 0 });
+    semis.set(p, 0);
+  });
+
+  for (const m of matches) {
+    const a = normName(m.a);
+    const b = normName(m.b);
+    const w = normName(m.winner);
+    if (!a || !b) continue;
+    if (!players.includes(a) || !players.includes(b)) continue;
+
+    played.set(a, (played.get(a) ?? 0) + 1);
+    played.set(b, (played.get(b) ?? 0) + 1);
+
+    if (w === a || w === b) {
+      const loser = w === a ? b : a;
+      wins.set(w, (wins.get(w) ?? 0) + 1);
+      losses.set(loser, (losses.get(loser) ?? 0) + 1);
+    }
+
+    if (m.phase === "DEMI") {
+      semis.set(a, (semis.get(a) ?? 0) + 1);
+      semis.set(b, (semis.get(b) ?? 0) + 1);
+    }
+
+    if (m.phase === "FINAL") {
+      const fa = finals.get(a) ?? { finals: 0, wins: 0 };
+      const fb = finals.get(b) ?? { finals: 0, wins: 0 };
+      finals.set(a, { finals: fa.finals + 1, wins: fa.wins + (w === a ? 1 : 0) });
+      finals.set(b, { finals: fb.finals + 1, wins: fb.wins + (w === b ? 1 : 0) });
+    }
+  }
+
+  const winRates = players.map((p) => {
+    const w = wins.get(p) ?? 0;
+    const l = losses.get(p) ?? 0;
+    const pl = played.get(p) ?? 0;
+    const rate = pl > 0 ? Math.round((w / pl) * 1000) / 10 : 0;
+    return { player: p, wins: w, losses: l, played: pl, rate };
+  });
+
+  const clutch = players.map((p) => {
+    const f = finals.get(p) ?? { finals: 0, wins: 0 };
+    const rate = f.finals > 0 ? Math.round((f.wins / f.finals) * 1000) / 10 : 0;
+    return { player: p, finals: f.finals, wins: f.wins, rate };
+  });
+
+  const semiRuns = players.map((p) => ({ player: p, semis: semis.get(p) ?? 0 }));
+
+  return { winRates, clutch, semiRuns };
+}
+
 function makeEmptySoiree(number = 1): Soiree {
   return {
     id: uid("s"),
@@ -689,6 +755,7 @@ export default function App() {
   const jackpotEUR = useMemo(() => computeJackpotEUR(currentSeason), [currentSeason]);
   const streaks = useMemo(() => computeWinStreaks(currentSeason), [currentSeason]);
   const h2h = useMemo(() => computeHeadToHead(currentSeason), [currentSeason]);
+  const advancedStats = useMemo(() => computeAdvancedStats(currentSeason), [currentSeason]);
 
   const playerColors = useMemo(() => {
     const map = new Map<string, string>();
@@ -2107,6 +2174,77 @@ export default function App() {
                   </div>
                 </div>
               )}
+            </Section>
+          </div>
+        )}
+
+        {tab === "CLASSEMENT" && (
+          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <Section title="Win rate (taux de victoire)">
+              <div className="space-y-2">
+                {advancedStats.winRates
+                  .slice()
+                  .sort((a, b) => b.rate - a.rate || b.wins - a.wins || a.player.localeCompare(b.player))
+                  .map((r) => (
+                    <div key={r.player} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.player) ?? "#ffffff33" }} />
+                          <span className="font-semibold">{r.player}</span>
+                        </div>
+                        <span className="font-bold">{r.rate}%</span>
+                      </div>
+                      <div className="mt-2 h-2 w-full rounded-full bg-white/10">
+                        <div
+                          className="h-2 rounded-full"
+                          style={{ width: `${r.rate}%`, background: playerColors.get(r.player) ?? "#22c55e" }}
+                        />
+                      </div>
+                      <div className="mt-1 text-xs text-white/60">
+                        {r.wins} V • {r.losses} D • {r.played} matchs
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </Section>
+
+            <Section title="Clutch (finales gagnées)">
+              <div className="space-y-2">
+                {advancedStats.clutch
+                  .slice()
+                  .sort((a, b) => b.rate - a.rate || b.finals - a.finals || a.player.localeCompare(b.player))
+                  .map((r) => (
+                    <div key={r.player} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.player) ?? "#ffffff33" }} />
+                          <span className="font-semibold">{r.player}</span>
+                        </div>
+                        <span className="font-bold">{r.rate}%</span>
+                      </div>
+                      <div className="mt-1 text-xs text-white/60">
+                        {r.wins} / {r.finals} finales gagnées
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </Section>
+
+            <Section title="Présence en demi-finales">
+              <div className="space-y-2">
+                {advancedStats.semiRuns
+                  .slice()
+                  .sort((a, b) => b.semis - a.semis || a.player.localeCompare(b.player))
+                  .map((r) => (
+                    <div key={r.player} className="flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.player) ?? "#ffffff33" }} />
+                        <span className="font-semibold">{r.player}</span>
+                      </div>
+                      <span className="font-bold">{r.semis}</span>
+                    </div>
+                  ))}
+              </div>
             </Section>
           </div>
         )}
