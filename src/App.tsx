@@ -1486,7 +1486,7 @@ export default function App() {
           </div>
         </div>
 
-        {tvMode && (
+        {tvMode && tab !== "CLASSEMENT" && (
           <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
             {seasonStats.table.slice(0, 3).map((r, idx) => {
               const label = idx === 0 ? "Champion" : idx === 1 ? "Challenger" : "Contender";
