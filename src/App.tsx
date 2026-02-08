@@ -25,6 +25,7 @@ type CoreMatch = {
   b: string;
   winner: "" | string;
   checkout100: boolean;
+  checkoutBy: "" | "A" | "B";
 };
 
 type RebuyMatch = {
@@ -138,6 +139,7 @@ function poolMatchesFor4(players: string[], pool: "A" | "B"): CoreMatch[] {
     b,
     winner: "",
     checkout100: false,
+    checkoutBy: "",
   }));
 }
 
@@ -168,16 +170,18 @@ function computePointsFromMatches(
 
   for (const m of matches) {
     const w = normName(m.winner);
-    if (!w) continue;
+    if (w) {
+      const basePts = m.phase === "PFINAL" ? 1 : 2;
+      add(pts, w, basePts);
+      add(wins, w, 1);
+    }
 
-    const basePts = m.phase === "PFINAL" ? 1 : 2;
-
-    add(pts, w, basePts);
-    add(wins, w, 1);
-
-    if (m.checkout100) {
-      add(bonus, w, 1);
-      add(pts, w, 1);
+    if (m.checkoutBy === "A" && normName(m.a)) {
+      add(bonus, normName(m.a), 1);
+      add(pts, normName(m.a), 1);
+    } else if (m.checkoutBy === "B" && normName(m.b)) {
+      add(bonus, normName(m.b), 1);
+      add(pts, normName(m.b), 1);
     }
   }
 
@@ -390,19 +394,30 @@ function sanitizeState(raw: any): AppState {
         const poolsA = (s?.pools?.A ?? []).map(normName).filter(isNonEmptyString);
         const poolsB = (s?.pools?.B ?? []).map(normName).filter(isNonEmptyString);
 
-        const matches: CoreMatch[] = (s?.matches ?? []).map((m: any, midx: number) => ({
-          id: normName(m?.id) || uid("m"),
-          order: clampInt(Number(m?.order ?? midx + 1), 1, 9999),
-          phase: (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase,
-          pool: m?.pool === "A" || m?.pool === "B" ? m.pool : null,
-          format: Number(m?.format) === 501 ? 501 : 301,
-          bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as any,
-          maxTurns: clampInt(Number(m?.maxTurns ?? 10), 1, 50),
-          a: normName(m?.a),
-          b: normName(m?.b),
-          winner: normName(m?.winner),
-          checkout100: Boolean(m?.checkout100),
-        }));
+        const matches: CoreMatch[] = (s?.matches ?? []).map((m: any, midx: number) => {
+          const phase = (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase;
+          const a = normName(m?.a);
+          const b = normName(m?.b);
+          const winner = normName(m?.winner);
+          const checkoutBy = m?.checkoutBy === "A" || m?.checkoutBy === "B" ? m.checkoutBy : "";
+          const inferredCheckoutBy =
+            checkoutBy ||
+            (m?.checkout100 && winner && (winner === a || winner === b) ? (winner === a ? "A" : "B") : "");
+          return {
+            id: normName(m?.id) || uid("m"),
+            order: clampInt(Number(m?.order ?? midx + 1), 1, 9999),
+            phase,
+            pool: m?.pool === "A" || m?.pool === "B" ? m.pool : null,
+            format: Number(m?.format) === 501 ? 501 : 301,
+            bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as any,
+            maxTurns: clampInt(Number(m?.maxTurns ?? 10), 1, 50),
+            a,
+            b,
+            winner,
+            checkout100: Boolean(inferredCheckoutBy),
+            checkoutBy: inferredCheckoutBy,
+          };
+        });
 
         const rebuys: RebuyMatch[] = (s?.rebuys ?? []).map((r: any) => ({
           id: normName(r?.id) || uid("rb"),
@@ -930,64 +945,68 @@ export default function App() {
         };
       }
 
-      const poolA = poolMatchesFor4(pools.A, "A");
-      const poolB = poolMatchesFor4(pools.B, "B");
-      const inter = interleavePools(poolA, poolB);
+          const poolA = poolMatchesFor4(pools.A, "A");
+          const poolB = poolMatchesFor4(pools.B, "B");
+          const inter = interleavePools(poolA, poolB);
 
-      const finals: CoreMatch[] = [
-        {
-          id: uid("m"),
-          order: inter.length + 1,
-          phase: "DEMI",
-          pool: null,
-          format: 301,
-          bo: "BO3",
-          maxTurns: 10,
-          a: "",
-          b: "",
-          winner: "",
-          checkout100: false,
-        },
-        {
-          id: uid("m"),
-          order: inter.length + 2,
-          phase: "DEMI",
-          pool: null,
-          format: 301,
-          bo: "BO3",
-          maxTurns: 10,
-          a: "",
-          b: "",
-          winner: "",
-          checkout100: false,
-        },
-        {
-          id: uid("m"),
-          order: inter.length + 3,
-          phase: "PFINAL",
-          pool: null,
-          format: 301,
-          bo: "BO3",
-          maxTurns: 10,
-          a: "",
-          b: "",
-          winner: "",
-          checkout100: false,
-        },
-        {
-          id: uid("m"),
-          order: inter.length + 4,
-          phase: "FINAL",
-          pool: null,
-          format: 501,
-          bo: "BO3",
-          maxTurns: 10,
-          a: "",
-          b: "",
-          winner: "",
-          checkout100: false,
-        },
-      ];
+          const finals: CoreMatch[] = [
+            {
+              id: uid("m"),
+              order: inter.length + 1,
+              phase: "DEMI",
+              pool: null,
+              format: 301,
+              bo: "BO3",
+              maxTurns: 10,
+              a: "",
+              b: "",
+              winner: "",
+              checkout100: false,
+              checkoutBy: "",
+            },
+            {
+              id: uid("m"),
+              order: inter.length + 2,
+              phase: "DEMI",
+              pool: null,
+              format: 301,
+              bo: "BO3",
+              maxTurns: 10,
+              a: "",
+              b: "",
+              winner: "",
+              checkout100: false,
+              checkoutBy: "",
+            },
+            {
+              id: uid("m"),
+              order: inter.length + 3,
+              phase: "PFINAL",
+              pool: null,
+              format: 301,
+              bo: "BO3",
+              maxTurns: 10,
+              a: "",
+              b: "",
+              winner: "",
+              checkout100: false,
+              checkoutBy: "",
+            },
+            {
+              id: uid("m"),
+              order: inter.length + 4,
+              phase: "FINAL",
+              pool: null,
+              format: 501,
+              bo: "BO3",
+              maxTurns: 10,
+              a: "",
+              b: "",
+              winner: "",
+              checkout100: false,
+              checkoutBy: "",
+            },
+          ];
 
       const newSoiree: Soiree = {
         id: uid("s"),
@@ -1019,7 +1038,8 @@ export default function App() {
           return {
             ...m,
             winner: valid ? w : "",
-            checkout100: valid ? m.checkout100 : false,
+            checkoutBy: !m.a || !m.b ? "" : m.checkoutBy,
+            checkout100: !m.a || !m.b ? false : Boolean(m.checkoutBy),
           };
         });
         return { ...s, matches };
@@ -1028,14 +1048,14 @@ export default function App() {
     });
   }
 
-  function setMatchCheckout100(matchId: string, val: boolean) {
+  function setMatchCheckoutBy(matchId: string, checkoutBy: "" | "A" | "B") {
     updateSeason((season) => {
       const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
         const matches = s.matches.map((m: CoreMatch) => {
           if (m.id !== matchId) return m;
-          if (!normName(m.winner)) return { ...m, checkout100: false };
-          return { ...m, checkout100: Boolean(val) };
+          if (!m.a || !m.b) return { ...m, checkoutBy: "", checkout100: false };
+          return { ...m, checkoutBy, checkout100: Boolean(checkoutBy) };
         });
         return { ...s, matches };
       });
@@ -1395,18 +1415,20 @@ export default function App() {
                     .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
                     .map((m: CoreMatch) => {
                       const winner = normName(m.winner);
-                      const bonus = m.checkout100 ? 1 : 0;
+                      const bonusA = m.checkoutBy === "A" ? 1 : 0;
+                      const bonusB = m.checkoutBy === "B" ? 1 : 0;
                       const basePts = m.phase === "PFINAL" ? 1 : 2;
-                      const ptsA = winner && winner === m.a ? basePts + bonus : 0;
-                      const ptsB = winner && winner === m.b ? basePts + bonus : 0;
+                      const ptsA = (winner && winner === m.a ? basePts : 0) + bonusA;
+                      const ptsB = (winner && winner === m.b ? basePts : 0) + bonusB;
                       const pickWinner = (name: string) => {
                         setMatchWinner(m.id, name);
                         if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
                       };
+                      const cardClass = winner ? "winner-anim" : "";
 
                       if (compactMode) {
                         return (
-                          <div key={m.id} className="rounded-2xl border border-white/10 bg-black/30 p-3">
+                          <div key={m.id} className={`rounded-2xl border border-white/10 bg-black/30 p-3 ${cardClass}`}>
                             <div className="flex items-center justify-between text-xs text-white/60">
                               <div>#{m.order}</div>
                               <div className="flex items-center gap-2">
@@ -1427,7 +1449,7 @@ export default function App() {
                             </div>
                             <div className="mt-2 grid grid-cols-1 gap-2">
                               <div className="grid grid-cols-2 gap-2">
-                                <Button variant={winner === m.a ? "primary" : "ghost"} onClick={() => pickWinner(m.a)} disabled={!m.a || !m.b}>
+                                <Button variant={winner === m.a ? "primary" : "ghost"} onClick={() => pickWinner(m.a)} disabled={!m.a || !m.b} >
                                   {m.a || "A"}
                                 </Button>
                                 <Button variant={winner === m.b ? "primary" : "ghost"} onClick={() => pickWinner(m.b)} disabled={!m.a || !m.b}>
@@ -1444,6 +1466,15 @@ export default function App() {
                                   Inverser A/B
                                 </button>
                               </div>
+                              <div className="grid grid-cols-1 gap-2">
+                                <Select
+                                  value={m.checkoutBy}
+                                  onChange={(v) => setMatchCheckoutBy(m.id, (v as "" | "A" | "B"))}
+                                  options={["A", "B"]}
+                                  placeholder="Checkout ≥100 par…"
+                                  disabled={!m.a || !m.b}
+                                />
+                              </div>
                             </div>
                             <div className="mt-2 flex items-center justify-between text-xs text-white/60">
                               <div>Pts</div>
@@ -1458,7 +1489,7 @@ export default function App() {
                       }
 
                       return (
-                        <div key={m.id} className="rounded-2xl border border-white/10 bg-black/30 p-3">
+                        <div key={m.id} className={`rounded-2xl border border-white/10 bg-black/30 p-3 ${cardClass}`}>
                           <div className="flex items-center justify-between text-xs text-white/60">
                             <div>Match #{m.order}</div>
                             <div className="flex items-center gap-2">
@@ -1496,16 +1527,13 @@ export default function App() {
                             >
                               Inverser A/B
                             </button>
-                            <label className="inline-flex items-center gap-2 text-xs text-white/80">
-                              <input
-                                type="checkbox"
-                                className="h-4 w-4 rounded border-white/20 bg-black"
-                                checked={!!m.checkout100}
-                                disabled={!normName(m.winner)}
-                                onChange={(e) => setMatchCheckout100(m.id, e.target.checked)}
-                              />
-                              Checkout ≥100
-                            </label>
+                            <Select
+                              value={m.checkoutBy}
+                              onChange={(v) => setMatchCheckoutBy(m.id, (v as "" | "A" | "B"))}
+                              options={["A", "B"]}
+                              placeholder="Checkout ≥100 par…"
+                              disabled={!m.a || !m.b}
+                            />
                           </div>
                           <div className="mt-3 flex items-center justify-between text-xs">
                             <div className="text-white/60">Points</div>
@@ -1531,7 +1559,7 @@ export default function App() {
                         <th className="py-2 pr-2">A</th>
                         <th className="py-2 pr-2">B</th>
                         <th className="py-2 pr-2">Vainqueur</th>
-                        <th className="py-2 pr-2">Checkout ≥100</th>
+                        <th className="py-2 pr-2">Checkout ≥100 par</th>
                         <th className="py-2 pr-2">Points A</th>
                         <th className="py-2 pr-2">Points B</th>
                       </tr>
@@ -1541,15 +1569,16 @@ export default function App() {
                         .slice()
                         .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
                         .map((m: CoreMatch) => {
-                          const options = [m.a, m.b].map(normName).filter(Boolean);
                           const winner = normName(m.winner);
-                          const bonus = m.checkout100 ? 1 : 0;
+                          const bonusA = m.checkoutBy === "A" ? 1 : 0;
+                          const bonusB = m.checkoutBy === "B" ? 1 : 0;
                           const basePts = m.phase === "PFINAL" ? 1 : 2;
-                          const ptsA = winner && winner === m.a ? basePts + bonus : 0;
-                          const ptsB = winner && winner === m.b ? basePts + bonus : 0;
+                          const ptsA = (winner && winner === m.a ? basePts : 0) + bonusA;
+                          const ptsB = (winner && winner === m.b ? basePts : 0) + bonusB;
+                          const rowClass = winner ? "winner-row" : "";
 
                           return (
-                            <tr key={m.id} className="border-t border-white/10">
+                            <tr key={m.id} className={`border-t border-white/10 ${rowClass}`}>
                               <td className="py-2 pr-2 text-white/70">{m.order}</td>
                               <td className="py-2 pr-2">
                                 <Pill>{m.phase}</Pill>
@@ -1577,22 +1606,19 @@ export default function App() {
                                     setMatchWinner(m.id, v);
                                     if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
                                   }}
-                                  options={options}
+                                  options={[m.a, m.b].map(normName).filter(Boolean)}
                                   placeholder="Vainqueur…"
                                   disabled={!m.a || !m.b}
                                 />
                               </td>
                               <td className="py-2 pr-2">
-                                <label className="inline-flex items-center gap-2 text-sm text-white/80">
-                                  <input
-                                    type="checkbox"
-                                    className="h-4 w-4 rounded border-white/20 bg-black"
-                                    checked={!!m.checkout100}
-                                    disabled={!normName(m.winner)}
-                                    onChange={(e) => setMatchCheckout100(m.id, e.target.checked)}
-                                  />
-                                  Oui
-                                </label>
+                                <Select
+                                  value={m.checkoutBy}
+                                  onChange={(v) => setMatchCheckoutBy(m.id, (v as "" | "A" | "B"))}
+                                  options={["A", "B"]}
+                                  placeholder="Checkout ≥100 par…"
+                                  disabled={!m.a || !m.b}
+                                />
                               </td>
                               <td className="py-2 pr-2 font-semibold">{ptsA}</td>
                               <td className="py-2 pr-2 font-semibold">{ptsB}</td>

@@ -15,3 +15,41 @@ body {
   min-height: 100vh;
   background: #0b0f17;
 }
+
+.winner-anim {
+  position: relative;
+  overflow: hidden;
+  animation: winnerPulse 1.2s ease-out 2;
+  box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.25), 0 0 24px rgba(34, 197, 94, 0.25);
+}
+
+.winner-anim::after {
+  content: "";
+  position: absolute;
+  inset: -40%;
+  pointer-events: none;
+  background-image:
+    radial-gradient(circle, rgba(34, 197, 94, 0.7) 0 2px, transparent 3px),
+    radial-gradient(circle, rgba(59, 130, 246, 0.7) 0 2px, transparent 3px),
+    radial-gradient(circle, rgba(234, 179, 8, 0.7) 0 2px, transparent 3px),
+    radial-gradient(circle, rgba(244, 63, 94, 0.7) 0 2px, transparent 3px);
+  background-size: 24px 24px, 28px 28px, 22px 22px, 26px 26px;
+  animation: confetti 1.4s ease-out 1;
+  opacity: 0;
+}
+
+.winner-row {
+  background: rgba(34, 197, 94, 0.08);
+}
+
+@keyframes winnerPulse {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.01); }
+  100% { transform: scale(1); }
+}
+
+@keyframes confetti {
+  0% { opacity: 0; transform: translateY(0) rotate(0deg); }
+  20% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(80px) rotate(12deg); }
+}
