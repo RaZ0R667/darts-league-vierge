@@ -1486,6 +1486,37 @@ export default function App() {
           </div>
         </div>
 
+        {tvMode && (
+          <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+            {seasonStats.table.slice(0, 3).map((r, idx) => {
+              const label = idx === 0 ? "Champion" : idx === 1 ? "Challenger" : "Contender";
+              const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : "🥉";
+              return (
+                <div
+                  key={r.name}
+                  className={`rounded-2xl border border-white/10 bg-black/40 p-5 shadow-[0_30px_80px_rgba(0,0,0,0.35)] ${
+                    idx === 0 ? "ring-2 ring-emerald-400/40" : ""
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs uppercase tracking-[0.3em] text-white/50">{label}</div>
+                    <div className="text-2xl">{medal}</div>
+                  </div>
+                  <div className="mt-4 flex items-center gap-3">
+                    <span className="h-3 w-3 rounded-full" style={{ background: playerColors.get(r.name) ?? "#ffffff33" }} />
+                    <div className="text-xl font-extrabold">{r.name}</div>
+                  </div>
+                  <div className="mt-3 flex items-center gap-3 text-sm text-white/70">
+                    <span className="font-semibold text-white">{r.pts} pts</span>
+                    <span>• {r.wins} V</span>
+                    <span>• {r.bonus} B</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
           <div className="md:col-span-2 rounded-2xl border border-white/10 bg-black/30 p-5">
             <div className="text-xs text-white/60">Jackpot actuel</div>
