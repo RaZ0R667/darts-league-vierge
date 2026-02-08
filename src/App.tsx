@@ -622,6 +622,9 @@ export default function App() {
   const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "PARAMS" | "SAISONS">("SOIREE");
   const [tvMode, setTvMode] = useState(false);
   const [, setTvIndex] = useState(0);
+  const [timelinePlay, setTimelinePlay] = useState(false);
+  const [timelineStep, setTimelineStep] = useState(0);
+  const [timelineSpeedMs, setTimelineSpeedMs] = useState(1200);
   const [compactMode, setCompactMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem("dl_compact_mode") === "1";
@@ -1360,6 +1363,22 @@ export default function App() {
     };
   }, [currentSeason.players, currentSeason.soirees]);
 
+  useEffect(() => {
+    const maxStep = Math.max(0, rankingTimeline.labels.length - 1);
+    if (timelineStep > maxStep) setTimelineStep(maxStep);
+  }, [rankingTimeline.labels.length, timelineStep]);
+
+  useEffect(() => {
+    if (!timelinePlay || rankingTimeline.labels.length === 0) return;
+    const handle = window.setInterval(() => {
+      setTimelineStep((prev) => {
+        const maxStep = Math.max(0, rankingTimeline.labels.length - 1);
+        return prev >= maxStep ? 0 : prev + 1;
+      });
+    }, timelineSpeedMs);
+    return () => window.clearInterval(handle);
+  }, [timelinePlay, timelineSpeedMs, rankingTimeline.labels.length]);
+
 
   return (
     <div className={`min-h-screen text-white app-shell ${tvMode ? "tv-mode" : ""}`}>
@@ -1965,12 +1984,41 @@ export default function App() {
               </div>
             </Section>
 
-            <Section title="Évolution du classement (global)">
+            <Section
+              title="Timeline animée — Évolution du classement"
+              right={
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button variant="ghost" onClick={() => setTimelinePlay((v) => !v)}>
+                    {timelinePlay ? "Pause" : "Lecture"}
+                  </Button>
+                  <Button variant="ghost" onClick={() => setTimelineStep(0)} disabled={rankingTimeline.labels.length === 0}>
+                    Début
+                  </Button>
+                </div>
+              }
+            >
               <div className="text-xs text-white/60 mb-2">Un seul graphique, toutes les soirées et tous les joueurs.</div>
               {rankingTimeline.labels.length === 0 ? (
                 <div className="text-sm text-white/70">Pas encore de soirées.</div>
               ) : (
                 <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="text-xs text-white/60">
+                      Soirée affichée : <span className="font-semibold text-white">S{rankingTimeline.labels[timelineStep] ?? rankingTimeline.labels[0]}</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-white/70">
+                      <span>Vitesse</span>
+                      <select
+                        className="rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-xs text-white"
+                        value={timelineSpeedMs}
+                        onChange={(e) => setTimelineSpeedMs(Number(e.target.value))}
+                      >
+                        <option value={2000}>Lente</option>
+                        <option value={1200}>Normale</option>
+                        <option value={700}>Rapide</option>
+                      </select>
+                    </div>
+                  </div>
                   <div className="w-full overflow-x-auto">
                     <div className="min-w-[640px]">
                       <svg viewBox="0 0 700 260" className="w-full h-[260px]">
@@ -1982,7 +2030,7 @@ export default function App() {
                           const padT = 20;
                           const padB = 30;
                           const playersCount = Math.max(currentSeason.players.length, 1);
-                          const pointsCount = Math.max(rankingTimeline.labels.length, 1);
+                          const pointsCount = Math.max(timelineStep + 1, 1);
                           const xScale = (i: number) => {
                             if (pointsCount === 1) return (w - padL - padR) / 2 + padL;
                             return padL + (i / (pointsCount - 1)) * (w - padL - padR);
@@ -2006,7 +2054,7 @@ export default function App() {
                                 );
                               })}
 
-                              {rankingTimeline.labels.map((label: number, i: number) => {
+                              {rankingTimeline.labels.slice(0, timelineStep + 1).map((label: number, i: number) => {
                                 const x = xScale(i);
                                 return (
                                   <text key={`x-${label}`} x={x} y={h - 8} fontSize="10" fill="#ffffff80" textAnchor="middle">
@@ -2016,8 +2064,9 @@ export default function App() {
                               })}
 
                               {rankingTimeline.series.map((ser: { player: string; ranks: number[] }) => {
-                                if (ser.ranks.length === 0) return null;
-                                const d = ser.ranks
+                                const sliced = ser.ranks.slice(0, timelineStep + 1);
+                                if (sliced.length === 0) return null;
+                                const d = sliced
                                   .map((rank, i) => `${i === 0 ? "M" : "L"} ${xScale(i)} ${yScale(rank)}`)
                                   .join(" ");
                                 return (
@@ -2035,6 +2084,17 @@ export default function App() {
                         })()}
                       </svg>
                     </div>
+                  </div>
+
+                  <div className="mt-3">
+                    <input
+                      type="range"
+                      min={0}
+                      max={Math.max(0, rankingTimeline.labels.length - 1)}
+                      value={timelineStep}
+                      onChange={(e) => setTimelineStep(Number(e.target.value))}
+                      className="w-full"
+                    />
                   </div>
 
                   <div className="mt-3 flex flex-wrap gap-2 text-xs">
