@@ -622,11 +622,6 @@ export default function App() {
   const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "PARAMS" | "SAISONS">("SOIREE");
   const [tvMode, setTvMode] = useState(false);
   const [, setTvIndex] = useState(0);
-  const [rankingQuery, setRankingQuery] = useState("");
-  const [rankingSort, setRankingSort] = useState<{ key: "rank" | "name" | "pts" | "wins" | "bonus"; dir: "asc" | "desc" }>({
-    key: "pts",
-    dir: "desc",
-  });
   const [compactMode, setCompactMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem("dl_compact_mode") === "1";
@@ -1365,23 +1360,6 @@ export default function App() {
     };
   }, [currentSeason.players, currentSeason.soirees]);
 
-  const rankingRows = useMemo(() => {
-    const base = seasonStats.table.map((r, idx) => ({ ...r, rank: idx + 1 }));
-    const q = rankingQuery.trim().toLowerCase();
-    const filtered = q ? base.filter((r) => r.name.toLowerCase().includes(q)) : base;
-
-    const sorted = [...filtered].sort((a, b) => {
-      const key = rankingSort.key;
-      const dir = rankingSort.dir === "asc" ? 1 : -1;
-      if (key === "rank") return dir * (a.rank - b.rank);
-      if (key === "name") return dir * a.name.localeCompare(b.name);
-      if (key === "pts") return dir * (a.pts - b.pts) || a.name.localeCompare(b.name);
-      if (key === "wins") return dir * (a.wins - b.wins) || a.name.localeCompare(b.name);
-      return dir * (a.bonus - b.bonus) || a.name.localeCompare(b.name);
-    });
-
-    return sorted;
-  }, [seasonStats.table, rankingQuery, rankingSort]);
 
   return (
     <div className={`min-h-screen text-white app-shell ${tvMode ? "tv-mode" : ""}`}>
@@ -1916,75 +1894,32 @@ export default function App() {
 
         {tab === "CLASSEMENT" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <Section
-              title="Classement interactif"
-              right={
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                  <input
-                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
-                    placeholder="Rechercher un joueur…"
-                    value={rankingQuery}
-                    onChange={(e) => setRankingQuery(e.target.value)}
-                  />
-                  <Button variant="ghost" onClick={() => setRankingQuery("")} disabled={!rankingQuery.trim()}>
-                    Effacer
-                  </Button>
-                </div>
-              }
-            >
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[520px] text-left text-sm">
-                  <thead>
-                    <tr className="text-white/70">
-                      {(
-                        [
-                          ["rank", "#"],
-                          ["name", "Joueur"],
-                          ["pts", "PTS"],
-                          ["wins", "V"],
-                          ["bonus", "B"],
-                        ] as const
-                      ).map(([key, label]) => (
-                        <th key={key} className="py-2 pr-2">
-                          <button
-                            className="inline-flex items-center gap-1 font-semibold hover:text-white"
-                            onClick={() =>
-                              setRankingSort((prev) => ({
-                                key,
-                                dir: prev.key === key && prev.dir === "desc" ? "asc" : "desc",
-                              }))
-                            }
-                          >
-                            {label}
-                            {rankingSort.key === key && (
-                              <span className="text-xs">{rankingSort.dir === "desc" ? "▼" : "▲"}</span>
-                            )}
-                          </button>
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rankingRows.map((r) => {
-                      const medal = r.rank === 1 ? "🥇" : r.rank === 2 ? "🥈" : r.rank === 3 ? "🥉" : "";
-                      return (
-                        <tr key={r.name} className="border-t border-white/10 hover:bg-white/5">
-                          <td className="py-2 pr-2 text-white/70">{r.rank}.</td>
-                          <td className="py-2 pr-2">
-                            <div className="flex items-center gap-2">
-                              <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.name) ?? "#ffffff33" }} />
-                              <span className="font-semibold">{r.name}</span>
-                              {medal && <span>{medal}</span>}
-                            </div>
-                          </td>
-                          <td className="py-2 pr-2 font-semibold">{r.pts}</td>
-                          <td className="py-2 pr-2 font-semibold">{r.wins}</td>
-                          <td className="py-2 pr-2 font-semibold">{r.bonus}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+            <Section title="Classement général (points ➜ victoires ➜ bonus)">
+              <div className="space-y-2">
+                {seasonStats.table.map((r, idx) => {
+                  const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : idx === 2 ? "🥉" : "";
+                  return (
+                    <div
+                      key={r.name}
+                      className="flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="text-white/60 w-6">{idx + 1}.</span>
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.name) ?? "#ffffff33" }} />
+                        <span className="font-semibold">{r.name}</span>
+                        {medal && <span>{medal}</span>}
+                      </div>
+                      <div className="flex items-center gap-3 text-xs sm:text-sm">
+                        <span className="text-white/70">PTS</span>
+                        <span className="font-bold">{r.pts}</span>
+                        <span className="text-white/70">V</span>
+                        <span className="font-bold">{r.wins}</span>
+                        <span className="text-white/70">B</span>
+                        <span className="font-bold">{r.bonus}</span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </Section>
 
