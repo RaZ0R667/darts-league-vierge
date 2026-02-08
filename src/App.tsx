@@ -621,7 +621,7 @@ export default function App() {
   const [state, setState] = useState<AppState>(() => loadState());
   const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "PARAMS" | "SAISONS">("SOIREE");
   const [tvMode, setTvMode] = useState(false);
-  const [tvIndex, setTvIndex] = useState(0);
+  const [, setTvIndex] = useState(0);
   const [compactMode, setCompactMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem("dl_compact_mode") === "1";
