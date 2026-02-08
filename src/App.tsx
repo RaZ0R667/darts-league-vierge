@@ -1031,7 +1031,7 @@ export default function App() {
     updateSeason((season) => {
       const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m: CoreMatch) => {
+        const matches: CoreMatch[] = s.matches.map((m: CoreMatch) => {
           if (m.id !== matchId) return m;
           const w = normName(winner);
           const valid = w && (w === normName(m.a) || w === normName(m.b));
@@ -1040,7 +1040,7 @@ export default function App() {
             winner: valid ? w : "",
             checkoutBy: !m.a || !m.b ? "" : m.checkoutBy,
             checkout100: !m.a || !m.b ? false : Boolean(m.checkoutBy),
-          };
+          } as CoreMatch;
         });
         return { ...s, matches };
       });
@@ -1052,11 +1052,11 @@ export default function App() {
     updateSeason((season) => {
       const soirees = season.soirees.map((s: Soiree) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m: CoreMatch) => {
+        const matches: CoreMatch[] = s.matches.map((m: CoreMatch) => {
           if (m.id !== matchId) return m;
           if (!m.a || !m.b) return { ...m, checkoutBy: "", checkout100: false };
-          const by = checkoutBy as "" | "A" | "B";
-          return { ...m, checkoutBy: by, checkout100: Boolean(by) };
+          const by: "" | "A" | "B" = checkoutBy;
+          return { ...m, checkoutBy: by, checkout100: Boolean(by) } as CoreMatch;
         });
         return { ...s, matches };
       });
