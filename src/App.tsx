@@ -551,7 +551,7 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-sm">
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_20px_60px_rgba(0,0,0,0.25)] backdrop-blur">
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-base font-semibold text-white">{title}</h2>
         {right}
@@ -620,6 +620,8 @@ export default function App() {
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState<AppState>(() => loadState());
   const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "PARAMS" | "SAISONS">("SOIREE");
+  const [tvMode, setTvMode] = useState(false);
+  const [tvIndex, setTvIndex] = useState(0);
   const [compactMode, setCompactMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem("dl_compact_mode") === "1";
@@ -724,6 +726,32 @@ export default function App() {
   const allSoireeNumbers = useMemo(() => {
     return [...currentSeason.soirees].map((s: Soiree) => s.number).sort((a: number, b: number) => a - b);
   }, [currentSeason.soirees]);
+
+  const tvTabs: Array<"SOIREE" | "CLASSEMENT" | "HISTO" | "H2H"> = ["SOIREE", "CLASSEMENT", "HISTO", "H2H"];
+  const tvLabels: Record<string, string> = {
+    SOIREE: "Soirée",
+    CLASSEMENT: "Classement",
+    HISTO: "Historique",
+    H2H: "Confrontations",
+  };
+
+  useEffect(() => {
+    if (!tvMode) return;
+    const idx = tvTabs.indexOf(tab as "SOIREE" | "CLASSEMENT" | "HISTO" | "H2H");
+    setTvIndex(idx >= 0 ? idx : 0);
+  }, [tvMode, tab]);
+
+  useEffect(() => {
+    if (!tvMode) return;
+    const handle = window.setInterval(() => {
+      setTvIndex((prev) => {
+        const next = (prev + 1) % tvTabs.length;
+        setTab(tvTabs[next]);
+        return next;
+      });
+    }, 12000);
+    return () => window.clearInterval(handle);
+  }, [tvMode, tvTabs.length]);
 
   function updateSeason(mutator: (season: Season) => Season) {
     setState((prev) => {
@@ -1334,33 +1362,41 @@ export default function App() {
   }, [currentSeason.players, currentSeason.soirees]);
 
   return (
-    <div className="min-h-screen bg-[#0b0f17] text-white">
+    <div className={`min-h-screen text-white app-shell ${tvMode ? "tv-mode" : ""}`}>
       <div className="mx-auto max-w-6xl px-4 pt-6 pb-24 md:pb-6">
         <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-          <div>
-            <div className="flex items-center gap-2">
-              <div className="h-10 w-10 rounded-2xl bg-white/10 grid place-items-center">🎯</div>
+          <div className="flex-1">
+            <div className="flex items-center gap-3">
+              <div className="h-11 w-11 rounded-2xl bg-white/10 grid place-items-center shadow-[0_0_30px_rgba(59,130,246,0.25)]">🎯</div>
               <div>
-                <h1 className="text-lg font-bold sm:text-xl">DARTS LEAGUE — App (local)</h1>
-                <div className="mt-0.5 text-xs sm:text-sm text-white/70">
-                  {currentSeason.name} • Sauvegarde locale (Safari)
-                </div>
+                <div className="text-[11px] uppercase tracking-[0.3em] text-white/50">Darts League</div>
+                <h1 className="text-2xl font-extrabold">Tableau de bord</h1>
+                <div className="mt-1 text-sm text-white/70">{currentSeason.name} • Sauvegarde locale</div>
               </div>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Pill color="#22c55e">Jackpot: {formatEUR(jackpotEUR)}</Pill>
               <Pill>Joueurs: {currentSeason.players.length}</Pill>
               <Pill>Soirées: {currentSeason.soirees.length}</Pill>
+              {tvMode && <Pill color="#38bdf8">MODE TV</Pill>}
+              {tvMode && <Pill>Écran: {tvLabels[tab] ?? tab}</Pill>}
             </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <Button variant="ghost" onClick={() => startNewSoiree()}>
-              Générer une soirée
+            <Button variant={tvMode ? "primary" : "ghost"} onClick={() => setTvMode((v) => !v)}>
+              {tvMode ? "Quitter Mode TV" : "Mode TV"}
             </Button>
-            <Button variant="danger" onClick={() => resetAll()}>
-              Reset complet
-            </Button>
+            {!tvMode && (
+              <Button variant="ghost" onClick={() => startNewSoiree()}>
+                Générer une soirée
+              </Button>
+            )}
+            {!tvMode && (
+              <Button variant="danger" onClick={() => resetAll()}>
+                Reset complet
+              </Button>
+            )}
           </div>
         </div>
 
@@ -1381,7 +1417,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="mb-6 hidden md:flex gap-2 overflow-x-auto pb-2">
+        <div className="mb-6 hidden md:flex gap-2 overflow-x-auto pb-2 tv-hide">
           {(
             [
               ["SOIREE", "Soirée"],
@@ -1405,7 +1441,7 @@ export default function App() {
           ))}
         </div>
 
-        <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0b0f17]/95 backdrop-blur">
+        <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0b0f17]/95 backdrop-blur tv-hide">
           <div className="mx-auto flex max-w-6xl items-center justify-between px-3 py-2">
             {(
               [
@@ -1432,7 +1468,7 @@ export default function App() {
         </div>
 
         {tab !== "PARAMS" && tab !== "SAISONS" && (
-          <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center sm:justify-between tv-hide">
             <div className="text-sm text-white/70">Soirée sélectionnée</div>
             <div className="w-full sm:w-56">
               <Select
