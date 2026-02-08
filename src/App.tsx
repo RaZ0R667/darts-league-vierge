@@ -45,6 +45,8 @@ type Soiree = {
   pools: { A: string[]; B: string[] };
   matches: CoreMatch[];
   rebuys: RebuyMatch[];
+  payments?: Record<string, boolean>;
+  financeNotes?: string;
   qualifiersOverride?: {
     A1?: string;
     A2?: string;
@@ -494,14 +496,22 @@ function sanitizeState(raw: any): AppState {
           createdAt: Number(r?.createdAt ?? Date.now()),
         }));
 
+        const paymentsRaw = s?.payments && typeof s.payments === "object" ? s.payments : {};
+        const payments: Record<string, boolean> = {};
+        for (const p of poolsA.concat(poolsB)) {
+          payments[p] = Boolean(paymentsRaw[p]);
+        }
+
         return {
           id: normName(s?.id) || uid("s"),
           number: clampInt(Number(s?.number ?? idx + 1), 1, 999),
           dateLabel: normName(s?.dateLabel) || undefined,
           createdAt: Number(s?.createdAt ?? Date.now()),
           pools: { A: poolsA, B: poolsB },
-        matches: matches.sort((a: CoreMatch, b: CoreMatch) => a.order - b.order),
-        rebuys: rebuys.sort((a: RebuyMatch, b: RebuyMatch) => a.createdAt - b.createdAt),
+          matches: matches.sort((a: CoreMatch, b: CoreMatch) => a.order - b.order),
+          rebuys: rebuys.sort((a: RebuyMatch, b: RebuyMatch) => a.createdAt - b.createdAt),
+          payments,
+          financeNotes: normName(s?.financeNotes) || "",
           qualifiersOverride:
             s?.qualifiersOverride && typeof s.qualifiersOverride === "object"
               ? {
@@ -685,7 +695,9 @@ function Select({
 export default function App() {
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState<AppState>(() => loadState());
-  const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "PARAMS" | "SAISONS">("SOIREE");
+  const [tab, setTab] = useState<
+    "SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "FINANCES" | "PARAMS" | "SAISONS"
+  >("SOIREE");
   const [tvMode, setTvMode] = useState(false);
   const [, setTvIndex] = useState(0);
   const [timelinePlay, setTimelinePlay] = useState(false);
@@ -826,6 +838,42 @@ export default function App() {
     setState((prev) => {
       const seasons = prev.seasons.map((s) => (s.id === prev.activeSeasonId ? mutator(s) : s));
       return { ...prev, seasons };
+    });
+  }
+
+  function updateFinancePayment(player: string, paid: boolean) {
+    updateSeason((season) => {
+      const soirees = season.soirees.map((s) => {
+        if (s.number !== currentSoiree.number) return s;
+        const payments = { ...(s.payments ?? {}) };
+        payments[player] = paid;
+        return { ...s, payments };
+      });
+      return { ...season, soirees };
+    });
+  }
+
+  function updateFinanceNotes(notes: string) {
+    updateSeason((season) => {
+      const soirees = season.soirees.map((s) =>
+        s.number === currentSoiree.number ? { ...s, financeNotes: notes } : s
+      );
+      return { ...season, soirees };
+    });
+  }
+
+  function updateFinanceAll(paid: boolean) {
+    const players = uniq([...currentSoiree.pools.A, ...currentSoiree.pools.B]).filter(isNonEmptyString);
+    updateSeason((season) => {
+      const soirees = season.soirees.map((s) => {
+        if (s.number !== currentSoiree.number) return s;
+        const payments = { ...(s.payments ?? {}) };
+        players.forEach((p) => {
+          payments[p] = paid;
+        });
+        return { ...s, payments };
+      });
+      return { ...season, soirees };
     });
   }
 
@@ -1112,6 +1160,11 @@ export default function App() {
         pools,
         matches: [...inter, ...finals],
         rebuys: [],
+        payments: players.reduce((acc, p) => {
+          acc[p] = false;
+          return acc;
+        }, {} as Record<string, boolean>),
+        financeNotes: "",
       };
 
       return { ...season, soirees: [...season.soirees, newSoiree] };
@@ -1541,6 +1594,7 @@ export default function App() {
               ["CLASSEMENT", "Classement"],
               ["HISTO", "Historique"],
               ["REBUY", "Re-buy"],
+              ["FINANCES", "Finances"],
               ["H2H", "Confrontations"],
               ["SAISONS", "Saisons"],
               ["PARAMS", "Paramètres"],
@@ -1566,6 +1620,7 @@ export default function App() {
                 ["CLASSEMENT", "Classement"],
                 ["HISTO", "Historique"],
                 ["REBUY", "Re-buy"],
+                ["FINANCES", "Finances"],
                 ["H2H", "H2H"],
                 ["SAISONS", "Saisons"],
                 ["PARAMS", "Params"],
@@ -2523,6 +2578,97 @@ export default function App() {
                   <div className="mt-2">
                     Jackpot actuel : <span className="font-extrabold text-white">{formatEUR(jackpotEUR)}</span>
                   </div>
+                </div>
+              </Section>
+            </div>
+          </div>
+        )}
+
+        {tab === "FINANCES" && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <div className="lg:col-span-2">
+              <Section title={`Finances — Soirée ${currentSoiree.number}`}>
+                <div className="mb-3 flex flex-wrap items-center gap-2">
+                  <Button variant="ghost" onClick={() => updateFinanceAll(true)}>
+                    Tout cocher
+                  </Button>
+                  <Button variant="ghost" onClick={() => updateFinanceAll(false)}>
+                    Tout décocher
+                  </Button>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[520px] text-left text-sm">
+                    <thead>
+                      <tr className="text-white/70">
+                        <th className="py-2 pr-2">Payé</th>
+                        <th className="py-2 pr-2">Joueur</th>
+                        <th className="py-2 pr-2">Montant</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {uniq([...currentSoiree.pools.A, ...currentSoiree.pools.B])
+                        .filter(isNonEmptyString)
+                        .map((p) => {
+                          const paid = Boolean(currentSoiree.payments?.[p]);
+                          return (
+                            <tr key={p} className="border-t border-white/10">
+                              <td className="py-2 pr-2">
+                                <input
+                                  type="checkbox"
+                                  className="h-4 w-4 rounded border-white/20 bg-black"
+                                  checked={paid}
+                                  onChange={(e) => updateFinancePayment(p, e.target.checked)}
+                                />
+                              </td>
+                              <td className="py-2 pr-2 font-semibold">{p}</td>
+                              <td className="py-2 pr-2">{formatEUR(MONEY.entryFeeEUR)}</td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Notes (règlements, remarques)</div>
+                  <textarea
+                    className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 p-3 text-sm text-white outline-none focus:border-white/25"
+                    rows={4}
+                    placeholder="Ex: Marvin a payé en espèces, Angel paie la prochaine soirée…"
+                    value={currentSoiree.financeNotes ?? ""}
+                    onChange={(e) => updateFinanceNotes(e.target.value)}
+                  />
+                </div>
+              </Section>
+            </div>
+
+            <div className="space-y-4">
+              <Section title="Récap soirée">
+                {(() => {
+                  const players = uniq([...currentSoiree.pools.A, ...currentSoiree.pools.B]).filter(isNonEmptyString);
+                  const paidCount = players.filter((p) => Boolean(currentSoiree.payments?.[p])).length;
+                  const total = players.length * MONEY.entryFeeEUR;
+                  return (
+                    <div className="text-sm text-white/70 space-y-2">
+                      <div>
+                        Joueurs: <span className="font-semibold text-white">{players.length}</span>
+                      </div>
+                      <div>
+                        Payés: <span className="font-semibold text-white">{paidCount}</span> / {players.length}
+                      </div>
+                      <div>
+                        Total dû: <span className="font-semibold text-white">{formatEUR(total)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </Section>
+
+              <Section title="Infos">
+                <div className="text-sm text-white/70 space-y-2">
+                  <div>• Suis les paiements par soirée.</div>
+                  <div>• Les notes sont privées (onglet finances).</div>
                 </div>
               </Section>
             </div>
