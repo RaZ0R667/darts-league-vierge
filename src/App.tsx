@@ -1494,10 +1494,16 @@ export default function App() {
               return (
                 <div
                   key={r.name}
-                  className={`rounded-2xl border border-white/10 bg-black/40 p-5 shadow-[0_30px_80px_rgba(0,0,0,0.35)] ${
+                  className={`relative rounded-2xl border border-white/10 bg-black/40 p-5 shadow-[0_30px_80px_rgba(0,0,0,0.35)] ${
                     idx === 0 ? "ring-2 ring-emerald-400/40 tv-spotlight" : ""
                   }`}
                 >
+                  {idx === 0 && (
+                    <span
+                      className="tv-spotlight-halo"
+                      style={{ background: playerColors.get(r.name) ?? "#22c55e" }}
+                    />
+                  )}
                   <div className="flex items-center justify-between">
                     <div className="text-xs uppercase tracking-[0.3em] text-white/50">{label}</div>
                     <div className="text-2xl">{medal}</div>

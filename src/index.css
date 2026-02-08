@@ -95,7 +95,32 @@ body {
   inset: -20% -10% auto -10%;
   height: 120%;
   background: radial-gradient(circle at 50% 0%, rgba(255, 255, 255, 0.18), transparent 55%);
+  animation: spotlightPulse 3.5s ease-in-out infinite;
   pointer-events: none;
+}
+
+.tv-spotlight::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), transparent 35%, rgba(255, 255, 255, 0.06) 65%, transparent 100%);
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.tv-spotlight-halo {
+  position: absolute;
+  inset: -25%;
+  border-radius: 999px;
+  filter: blur(18px);
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+@keyframes spotlightPulse {
+  0% { opacity: 0.55; transform: translateY(0); }
+  50% { opacity: 0.9; transform: translateY(6px); }
+  100% { opacity: 0.55; transform: translateY(0); }
 }
 
 .winner-anim {
