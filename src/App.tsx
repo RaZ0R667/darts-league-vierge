@@ -12,11 +12,41 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  */
 
 type Phase = "POULE" | "DEMI" | "PFINAL" | "FINAL";
+type MatchStatus = "PENDING" | "VALIDATED" | "CONTESTED";
+type RulesProfile = "STANDARD" | "FUN" | "CUSTOM";
+
+type RulesConfig = {
+  winPoints: number;
+  smallFinalPoints: number;
+  checkoutBonusPoints: number;
+  jackpotPerPlayerEUR: number;
+  rebuyEUR: number;
+  rebuyWinPointsS1S2: number;
+  rebuyFirstWinPointsS3Plus: number;
+  rebuyNextWinPointsS3Plus: number;
+  defaultPoolFormat: 301 | 501;
+  defaultFinalFormat: 301 | 501;
+};
+
+type AuditEntry = {
+  id: string;
+  ts: number;
+  action: string;
+  details?: string;
+};
+
+type SnapshotEntry = {
+  id: string;
+  ts: number;
+  label: string;
+  state: AppState;
+};
 
 type CoreMatch = {
   id: string;
   order: number;
   phase: Phase;
+  status: MatchStatus;
   pool: "A" | "B" | null;
   format: 301 | 501;
   bo: "BO1" | "BO3" | "BO5" | "SEC";
@@ -25,7 +55,6 @@ type CoreMatch = {
   b: string;
   winner: "" | string;
   checkout100: boolean;
-  checkoutBy: "" | "A" | "B";
 };
 
 type RebuyMatch = {
@@ -45,8 +74,6 @@ type Soiree = {
   pools: { A: string[]; B: string[] };
   matches: CoreMatch[];
   rebuys: RebuyMatch[];
-  payments?: Record<string, boolean>;
-  financeNotes?: string;
   qualifiersOverride?: {
     A1?: string;
     A2?: string;
@@ -64,30 +91,52 @@ type Season = {
 
 type FunModeState = {
   players: string[];
-  format: 301 | 501;
-  moneyEnabled: boolean;
-  moneyPerPlayer: number;
   matches: CoreMatch[];
-  finals: CoreMatch[];
-  positionRounds: Array<{ id: string; positions: string[] }>;
 };
 
 type AppState = {
   version: number;
-  seasons: Season[];
-  activeSeasonId: string;
+  season: Season;
   funMode: FunModeState;
+  system: {
+    rulesProfile: RulesProfile;
+    customRules: RulesConfig;
+    audit: AuditEntry[];
+  };
 };
 
-const STORAGE_KEY = "darts_league_app_v2";
-const VERSION = 2;
+const STORAGE_KEY = "darts_league_app_v1";
+const VERSION = 1;
 
 const MONEY = {
   entryFeeEUR: 3,
-  jackpotPerPlayerEUR: 1,
-  rebuyEUR: 0.5,
   podiumEUR: { first: 7, second: 3, third: 2 },
 };
+
+const STANDARD_RULES: RulesConfig = {
+  winPoints: 2,
+  smallFinalPoints: 1,
+  checkoutBonusPoints: 1,
+  jackpotPerPlayerEUR: 1,
+  rebuyEUR: 0.5,
+  rebuyWinPointsS1S2: 2,
+  rebuyFirstWinPointsS3Plus: 2,
+  rebuyNextWinPointsS3Plus: 1,
+  defaultPoolFormat: 301,
+  defaultFinalFormat: 501,
+};
+
+const FUN_RULES: RulesConfig = {
+  ...STANDARD_RULES,
+  winPoints: 1,
+  smallFinalPoints: 1,
+  checkoutBonusPoints: 0,
+  jackpotPerPlayerEUR: 0,
+  rebuyEUR: 0,
+};
+
+const SNAPSHOTS_KEY = "darts_league_snapshots_v1";
+const MAX_SNAPSHOTS = 20;
 
 const PALETTE = [
   "#22c55e",
@@ -138,7 +187,60 @@ function hashString(s: string) {
   return Math.abs(h);
 }
 
-function buildRoundRobinMatches(players: string[], format: 301 | 501): CoreMatch[] {
+function getRules(profile: RulesProfile, customRules: RulesConfig): RulesConfig {
+  if (profile === "FUN") return FUN_RULES;
+  if (profile === "CUSTOM") return customRules;
+  return STANDARD_RULES;
+}
+
+function loadSnapshots(): SnapshotEntry[] {
+  try {
+    const raw = localStorage.getItem(SNAPSHOTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((x: any) => ({
+        id: normName(x?.id) || uid("snap"),
+        ts: Number(x?.ts ?? Date.now()),
+        label: normName(x?.label) || "Snapshot",
+        state: sanitizeState(x?.state),
+      }))
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, MAX_SNAPSHOTS);
+  } catch {
+    return [];
+  }
+}
+
+function saveSnapshots(snaps: SnapshotEntry[]) {
+  try {
+    localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snaps.slice(0, MAX_SNAPSHOTS)));
+  } catch {}
+}
+
+function runSeasonDiagnostics(season: Season) {
+  const issues: string[] = [];
+  const playersSet = new Set(season.players);
+
+  if (season.players.length < 2) issues.push("Pas assez de joueurs dans la saison.");
+
+  for (const so of season.soirees) {
+    const participants = uniq([...so.pools.A, ...so.pools.B]);
+    if (participants.length === 0) issues.push(`Soirée ${so.number}: aucune poule définie.`);
+    for (const m of so.matches) {
+      if (m.a && !playersSet.has(m.a)) issues.push(`Soirée ${so.number} Match #${m.order}: joueur A inconnu (${m.a}).`);
+      if (m.b && !playersSet.has(m.b)) issues.push(`Soirée ${so.number} Match #${m.order}: joueur B inconnu (${m.b}).`);
+      if (m.winner && m.winner !== m.a && m.winner !== m.b) {
+        issues.push(`Soirée ${so.number} Match #${m.order}: vainqueur incohérent.`);
+      }
+    }
+  }
+
+  return issues;
+}
+
+function buildRoundRobinMatches(players: string[]): CoreMatch[] {
   const pairs: Array<[string, string]> = [];
   for (let i = 0; i < players.length; i++) {
     for (let j = i + 1; j < players.length; j++) {
@@ -149,15 +251,15 @@ function buildRoundRobinMatches(players: string[], format: 301 | 501): CoreMatch
     id: uid("funm"),
     order: idx + 1,
     phase: "POULE",
+    status: "PENDING",
     pool: null,
-    format,
+    format: 301,
     bo: "BO3",
     maxTurns: 10,
     a,
     b,
     winner: "",
     checkout100: false,
-    checkoutBy: "",
   }));
 }
 
@@ -176,6 +278,7 @@ function poolMatchesFor4(players: string[], pool: "A" | "B"): CoreMatch[] {
     id: uid("m"),
     order: idx + 1,
     phase: "POULE",
+    status: "PENDING",
     pool,
     format: 301,
     bo: "BO3",
@@ -184,7 +287,6 @@ function poolMatchesFor4(players: string[], pool: "A" | "B"): CoreMatch[] {
     b,
     winner: "",
     checkout100: false,
-    checkoutBy: "",
   }));
 }
 
@@ -202,7 +304,8 @@ function computePointsFromMatches(
   matches: CoreMatch[],
   rebuyMatches: RebuyMatch[],
   seasonSoireeNumber?: number,
-  season?: Season
+  season?: Season,
+  rules: RulesConfig = STANDARD_RULES
 ) {
   const pts = new Map<string, number>();
   const wins = new Map<string, number>();
@@ -215,18 +318,16 @@ function computePointsFromMatches(
 
   for (const m of matches) {
     const w = normName(m.winner);
-    if (w) {
-      const basePts = m.phase === "PFINAL" ? 1 : 2;
-      add(pts, w, basePts);
-      add(wins, w, 1);
-    }
+    if (!w) continue;
 
-    if (m.checkoutBy === "A" && normName(m.a)) {
-      add(bonus, normName(m.a), 1);
-      add(pts, normName(m.a), 1);
-    } else if (m.checkoutBy === "B" && normName(m.b)) {
-      add(bonus, normName(m.b), 1);
-      add(pts, normName(m.b), 1);
+    const basePts = m.phase === "PFINAL" ? rules.smallFinalPoints : rules.winPoints;
+
+    add(pts, w, basePts);
+    add(wins, w, 1);
+
+    if (m.checkout100) {
+      add(bonus, w, 1);
+      add(pts, w, rules.checkoutBonusPoints);
     }
   }
 
@@ -234,7 +335,7 @@ function computePointsFromMatches(
 
   const priorCompleted = new Map<string, number>();
   if (soN >= 3 && season) {
-    const soireesAsc = [...season.soirees].sort((a: Soiree, b: Soiree) => a.number - b.number);
+    const soireesAsc = [...season.soirees].sort((a, b) => a.number - b.number);
     for (const s of soireesAsc) {
       if (s.number >= soN) break;
       for (const rb of s.rebuys) {
@@ -246,7 +347,7 @@ function computePointsFromMatches(
     }
   }
 
-  const sortedRebuys = [...rebuyMatches].sort((a: RebuyMatch, b: RebuyMatch) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+  const sortedRebuys = [...rebuyMatches].sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
 
   const localCompleted = new Map<string, number>();
   const doneBefore = (buyer: string) => (priorCompleted.get(buyer) ?? 0) + (localCompleted.get(buyer) ?? 0);
@@ -259,14 +360,19 @@ function computePointsFromMatches(
 
     if (soN > 0 && soN <= 2) {
       if (w === buyer) {
-        add(pts, buyer, 2);
+        add(pts, buyer, rules.rebuyWinPointsS1S2);
         add(wins, buyer, 1);
       }
       incLocalDone(buyer);
       continue;
     }
 
-    const winPts = soN >= 3 ? (doneBefore(buyer) === 0 ? 2 : 1) : 2;
+    const winPts =
+      soN >= 3
+        ? doneBefore(buyer) === 0
+          ? rules.rebuyFirstWinPointsS3Plus
+          : rules.rebuyNextWinPointsS3Plus
+        : rules.rebuyWinPointsS1S2;
 
     if (w === buyer) {
       add(pts, buyer, winPts);
@@ -279,7 +385,7 @@ function computePointsFromMatches(
   return { pts, wins, bonus };
 }
 
-function aggregateSeasonStats(season: Season) {
+function aggregateSeasonStats(season: Season, rules: RulesConfig = STANDARD_RULES) {
   const pts = new Map<string, number>();
   const wins = new Map<string, number>();
   const bonus = new Map<string, number>();
@@ -290,7 +396,7 @@ function aggregateSeasonStats(season: Season) {
   };
 
   for (const s of season.soirees) {
-    const { pts: p, wins: w, bonus: b } = computePointsFromMatches(s.matches, s.rebuys, s.number, season);
+    const { pts: p, wins: w, bonus: b } = computePointsFromMatches(s.matches, s.rebuys, s.number, season, rules);
     for (const [k, v] of p.entries()) add(pts, k, v);
     for (const [k, v] of w.entries()) add(wins, k, v);
     for (const [k, v] of b.entries()) add(bonus, k, v);
@@ -309,7 +415,7 @@ function aggregateSeasonStats(season: Season) {
     bonus: bonus.get(name) ?? 0,
   }));
 
-  table.sort((a: { name: string; pts: number; wins: number; bonus: number }, b: { name: string; pts: number; wins: number; bonus: number }) => {
+  table.sort((a, b) => {
     if (b.pts !== a.pts) return b.pts - a.pts;
     if (b.wins !== a.wins) return b.wins - a.wins;
     return a.name.localeCompare(b.name);
@@ -318,10 +424,10 @@ function aggregateSeasonStats(season: Season) {
   return { table, pts, wins, bonus };
 }
 
-function computeJackpotEUR(season: Season) {
+function computeJackpotEUR(season: Season, rules: RulesConfig = STANDARD_RULES) {
   const base = season.soirees.reduce((sum, s) => sum + s.pools.A.length + s.pools.B.length, 0);
   const rebuyCount = season.soirees.reduce((sum, s) => sum + s.rebuys.length, 0);
-  return base * MONEY.jackpotPerPlayerEUR + rebuyCount * MONEY.rebuyEUR;
+  return base * rules.jackpotPerPlayerEUR + rebuyCount * rules.rebuyEUR;
 }
 
 function computeWinStreaks(season: Season) {
@@ -368,7 +474,7 @@ function computeWinStreaks(season: Season) {
   }
 
   const out = allPlayers.map((p) => ({ player: p, best: best.get(p) ?? 0 }));
-  out.sort((a: { player: string; best: number }, b: { player: string; best: number }) => b.best - a.best || a.player.localeCompare(b.player));
+  out.sort((a, b) => b.best - a.best || a.player.localeCompare(b.player));
   return out;
 }
 
@@ -393,111 +499,149 @@ function computeHeadToHead(season: Season) {
   return { players, matrix };
 }
 
-function computeAdvancedStats(season: Season) {
-  const players = season.players;
-  const matches = season.soirees.flatMap((s) => s.matches);
+const SEASON1_PLAYERS = [
+  "ANGEL",
+  "SAMUEL",
+  "MARVIN",
+  "CLÉMENT",
+  "ACHIL",
+  "BAPTISTE",
+  "EMERIC",
+  "JOAO",
+];
 
-  const wins = new Map<string, number>();
-  const losses = new Map<string, number>();
-  const played = new Map<string, number>();
-  const finals = new Map<string, { finals: number; wins: number }>();
-  const semis = new Map<string, number>();
+function seedSoiree1(): Soiree {
+  const pools = {
+    A: ["CLÉMENT", "ANGEL", "BAPTISTE", "EMERIC"],
+    B: ["JOAO", "SAMUEL", "MARVIN", "ACHIL"],
+  };
 
-  players.forEach((p) => {
-    wins.set(p, 0);
-    losses.set(p, 0);
-    played.set(p, 0);
-    finals.set(p, { finals: 0, wins: 0 });
-    semis.set(p, 0);
-  });
+  const base: Array<{ order: number; phase: Phase; pool: "A" | "B" | null; a: string; b: string; winner: string }> = [
+    { order: 1, phase: "POULE", pool: "A", a: "CLÉMENT", b: "ANGEL", winner: "ANGEL" },
+    { order: 2, phase: "POULE", pool: "B", a: "JOAO", b: "SAMUEL", winner: "SAMUEL" },
+    { order: 3, phase: "POULE", pool: "A", a: "EMERIC", b: "BAPTISTE", winner: "BAPTISTE" },
+    { order: 4, phase: "POULE", pool: "B", a: "MARVIN", b: "ACHIL", winner: "MARVIN" },
+    { order: 5, phase: "POULE", pool: "A", a: "BAPTISTE", b: "CLÉMENT", winner: "CLÉMENT" },
+    { order: 6, phase: "POULE", pool: "B", a: "MARVIN", b: "JOAO", winner: "MARVIN" },
+    { order: 7, phase: "POULE", pool: "A", a: "ANGEL", b: "EMERIC", winner: "EMERIC" },
+    { order: 8, phase: "POULE", pool: "B", a: "SAMUEL", b: "ACHIL", winner: "SAMUEL" },
+    { order: 9, phase: "POULE", pool: "A", a: "CLÉMENT", b: "EMERIC", winner: "CLÉMENT" },
+    { order: 10, phase: "POULE", pool: "B", a: "JOAO", b: "ACHIL", winner: "ACHIL" },
+    { order: 11, phase: "POULE", pool: "A", a: "ANGEL", b: "BAPTISTE", winner: "ANGEL" },
+    { order: 12, phase: "POULE", pool: "B", a: "SAMUEL", b: "MARVIN", winner: "SAMUEL" },
+    { order: 13, phase: "DEMI", pool: null, a: "ANGEL", b: "SAMUEL", winner: "ANGEL" },
+    { order: 14, phase: "DEMI", pool: null, a: "CLÉMENT", b: "MARVIN", winner: "MARVIN" },
+    { order: 15, phase: "PFINAL", pool: null, a: "CLÉMENT", b: "SAMUEL", winner: "SAMUEL" },
+    { order: 16, phase: "FINAL", pool: null, a: "ANGEL", b: "MARVIN", winner: "ANGEL" },
+  ];
 
-  for (const m of matches) {
-    const a = normName(m.a);
-    const b = normName(m.b);
-    const w = normName(m.winner);
-    if (!a || !b) continue;
-    if (!players.includes(a) || !players.includes(b)) continue;
+  const matches: CoreMatch[] = base.map((m, idx) => ({
+    id: uid("m"),
+    order: idx + 1,
+    phase: m.phase,
+    status: m.winner ? "VALIDATED" : "PENDING",
+    pool: m.pool,
+    format: m.phase === "FINAL" ? 501 : 301,
+    bo: "BO3",
+    maxTurns: 10,
+    a: m.a,
+    b: m.b,
+    winner: m.winner,
+    checkout100: false,
+  }));
 
-    played.set(a, (played.get(a) ?? 0) + 1);
-    played.set(b, (played.get(b) ?? 0) + 1);
-
-    if (w === a || w === b) {
-      const loser = w === a ? b : a;
-      wins.set(w, (wins.get(w) ?? 0) + 1);
-      losses.set(loser, (losses.get(loser) ?? 0) + 1);
-    }
-
-    if (m.phase === "DEMI") {
-      semis.set(a, (semis.get(a) ?? 0) + 1);
-      semis.set(b, (semis.get(b) ?? 0) + 1);
-    }
-
-    if (m.phase === "FINAL") {
-      const fa = finals.get(a) ?? { finals: 0, wins: 0 };
-      const fb = finals.get(b) ?? { finals: 0, wins: 0 };
-      finals.set(a, { finals: fa.finals + 1, wins: fa.wins + (w === a ? 1 : 0) });
-      finals.set(b, { finals: fb.finals + 1, wins: fb.wins + (w === b ? 1 : 0) });
-    }
-  }
-
-  const winRates = players.map((p) => {
-    const w = wins.get(p) ?? 0;
-    const l = losses.get(p) ?? 0;
-    const pl = played.get(p) ?? 0;
-    const rate = pl > 0 ? Math.round((w / pl) * 1000) / 10 : 0;
-    return { player: p, wins: w, losses: l, played: pl, rate };
-  });
-
-  const clutch = players.map((p) => {
-    const f = finals.get(p) ?? { finals: 0, wins: 0 };
-    const rate = f.finals > 0 ? Math.round((f.wins / f.finals) * 1000) / 10 : 0;
-    return { player: p, finals: f.finals, wins: f.wins, rate };
-  });
-
-  const semiRuns = players.map((p) => ({ player: p, semis: semis.get(p) ?? 0 }));
-
-  return { winRates, clutch, semiRuns };
-}
-
-function makeEmptySoiree(number = 1): Soiree {
   return {
     id: uid("s"),
-    number,
-    createdAt: Date.now(),
-    pools: { A: [], B: [] },
-    matches: [],
+    number: 1,
+    createdAt: Date.now() - 1000 * 60 * 60 * 24 * 2,
+    pools,
+    matches,
     rebuys: [],
   };
 }
 
-function makeEmptySeason(name = "Saison 1"): Season {
-  return {
-    id: uid("season"),
-    name,
-    players: [],
-    soirees: [makeEmptySoiree(1)],
+function seedSoiree2(): Soiree {
+  const pools = {
+    A: ["ACHIL", "JOAO", "ANGEL", "MARVIN"],
+    B: ["SAMUEL", "EMERIC", "BAPTISTE", "CLÉMENT"],
   };
-}
 
-function makeEmptyFunMode(): FunModeState {
+  const base: Array<Partial<CoreMatch> & { phase: Phase; pool: "A" | "B" | null; a: string; b: string; winner: string; format?: 301 | 501 }> = [
+    { phase: "POULE", pool: "A", a: "ACHIL", b: "JOAO", winner: "JOAO", format: 301 },
+    { phase: "POULE", pool: "B", a: "SAMUEL", b: "EMERIC", winner: "SAMUEL", format: 301 },
+    { phase: "POULE", pool: "A", a: "ANGEL", b: "MARVIN", winner: "ANGEL", format: 301 },
+    { phase: "POULE", pool: "B", a: "BAPTISTE", b: "CLÉMENT", winner: "CLÉMENT", format: 301 },
+    { phase: "POULE", pool: "A", a: "ACHIL", b: "ANGEL", winner: "ACHIL", format: 301, checkout100: true },
+    { phase: "POULE", pool: "B", a: "SAMUEL", b: "BAPTISTE", winner: "BAPTISTE", format: 301 },
+    { phase: "POULE", pool: "A", a: "JOAO", b: "MARVIN", winner: "MARVIN", format: 301 },
+    { phase: "POULE", pool: "B", a: "EMERIC", b: "CLÉMENT", winner: "EMERIC", format: 301 },
+    { phase: "POULE", pool: "A", a: "ACHIL", b: "MARVIN", winner: "MARVIN", format: 301 },
+    { phase: "POULE", pool: "B", a: "SAMUEL", b: "CLÉMENT", winner: "SAMUEL", format: 301 },
+    { phase: "POULE", pool: "A", a: "JOAO", b: "ANGEL", winner: "JOAO", format: 301 },
+    { phase: "POULE", pool: "B", a: "EMERIC", b: "BAPTISTE", winner: "BAPTISTE", format: 301 },
+    { phase: "DEMI", pool: null, a: "JOAO", b: "SAMUEL", winner: "JOAO", format: 301 },
+    { phase: "DEMI", pool: null, a: "BAPTISTE", b: "MARVIN", winner: "BAPTISTE", format: 301 },
+    { phase: "PFINAL", pool: null, a: "SAMUEL", b: "MARVIN", winner: "MARVIN", format: 301 },
+    { phase: "FINAL", pool: null, a: "JOAO", b: "BAPTISTE", winner: "JOAO", format: 501 },
+  ];
+
+  const matches: CoreMatch[] = base.map((m, idx) => ({
+    id: uid("m"),
+    order: idx + 1,
+    phase: m.phase,
+    status: m.winner ? "VALIDATED" : "PENDING",
+    pool: m.pool,
+    format: (m.format ?? (m.phase === "FINAL" ? 501 : 301)) as 301 | 501,
+    bo: "BO3",
+    maxTurns: 10,
+    a: m.a,
+    b: m.b,
+    winner: m.winner,
+    checkout100: Boolean((m as any).checkout100),
+  }));
+
+  const rebuys: RebuyMatch[] = [
+    { buyer: "CLÉMENT", a: "CLÉMENT", b: "EMERIC", winner: "CLÉMENT" },
+    { buyer: "ACHIL", a: "ACHIL", b: "MARVIN", winner: "ACHIL" },
+    { buyer: "ANGEL", a: "ANGEL", b: "JOAO", winner: "ANGEL" },
+    { buyer: "EMERIC", a: "EMERIC", b: "BAPTISTE", winner: "EMERIC" },
+  ].map((r, i) => ({
+    id: uid("rb"),
+    buyer: r.buyer,
+    a: r.a,
+    b: r.b,
+    winner: r.winner,
+    createdAt: Date.now() - 1000 * 60 * 60 * 12 + i * 1000,
+  }));
+
   return {
-    players: [],
-    format: 301,
-    moneyEnabled: false,
-    moneyPerPlayer: 0,
-    matches: [],
-    finals: [],
-    positionRounds: [],
+    id: uid("s"),
+    number: 2,
+    createdAt: Date.now() - 1000 * 60 * 60 * 24,
+    pools,
+    matches,
+    rebuys,
   };
 }
 
 function makeInitialState(): AppState {
-  const season = makeEmptySeason("Saison 1");
   return {
     version: VERSION,
-    seasons: [season],
-    activeSeasonId: season.id,
-    funMode: makeEmptyFunMode(),
+    season: {
+      id: uid("season"),
+      name: "Saison 1",
+      players: [...SEASON1_PLAYERS],
+      soirees: [seedSoiree1(), seedSoiree2()],
+    },
+    funMode: {
+      players: [],
+      matches: [],
+    },
+    system: {
+      rulesProfile: "STANDARD",
+      customRules: { ...STANDARD_RULES },
+      audit: [],
+    },
   };
 }
 
@@ -506,113 +650,93 @@ function sanitizeState(raw: any): AppState {
   try {
     if (!raw || typeof raw !== "object") return fallback;
     const v = Number(raw.version ?? 0);
-    const seasonsRaw = Array.isArray(raw.seasons)
-      ? raw.seasons
-      : raw.season && typeof raw.season === "object"
-        ? [raw.season]
-        : [];
+    const season = raw.season;
+    if (!season || typeof season !== "object") return fallback;
 
-    const sanitizeSeason = (season: any, i: number): Season => {
-      const players = uniq((season?.players ?? []).map(normName)).filter(isNonEmptyString);
-      const soirees: Soiree[] = (season?.soirees ?? []).map((s: any, idx: number) => {
-        const poolsA = (s?.pools?.A ?? []).map(normName).filter(isNonEmptyString);
-        const poolsB = (s?.pools?.B ?? []).map(normName).filter(isNonEmptyString);
+    const players = uniq((season.players ?? []).map(normName)).filter(isNonEmptyString);
+    const soirees: Soiree[] = (season.soirees ?? []).map((s: any, i: number) => {
+      const poolsA = (s?.pools?.A ?? []).map(normName).filter(Boolean);
+      const poolsB = (s?.pools?.B ?? []).map(normName).filter(Boolean);
 
-        const matches: CoreMatch[] = (s?.matches ?? []).map((m: any, midx: number) => {
-          const phase = (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase;
-          const a = normName(m?.a);
-          const b = normName(m?.b);
-          const winner = normName(m?.winner);
-          const checkoutBy = m?.checkoutBy === "A" || m?.checkoutBy === "B" ? m.checkoutBy : "";
-          const inferredCheckoutBy =
-            checkoutBy ||
-            (m?.checkout100 && winner && (winner === a || winner === b) ? (winner === a ? "A" : "B") : "");
-          return {
-            id: normName(m?.id) || uid("m"),
-            order: clampInt(Number(m?.order ?? midx + 1), 1, 9999),
-            phase,
-            pool: m?.pool === "A" || m?.pool === "B" ? m.pool : null,
-            format: Number(m?.format) === 501 ? 501 : 301,
-            bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as any,
-            maxTurns: clampInt(Number(m?.maxTurns ?? 10), 1, 50),
-            a,
-            b,
-            winner,
-            checkout100: Boolean(inferredCheckoutBy),
-            checkoutBy: inferredCheckoutBy,
-          };
-        });
+      const matches: CoreMatch[] = (s?.matches ?? []).map((m: any, idx: number) => ({
+        id: normName(m?.id) || uid("m"),
+        order: clampInt(Number(m?.order ?? idx + 1), 1, 9999),
+        phase: (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase,
+        status:
+          m?.status === "PENDING" || m?.status === "VALIDATED" || m?.status === "CONTESTED"
+            ? m.status
+            : normName(m?.winner)
+              ? "VALIDATED"
+              : "PENDING",
+        pool: m?.pool === "A" || m?.pool === "B" ? m.pool : null,
+        format: Number(m?.format) === 501 ? 501 : 301,
+        bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as any,
+        maxTurns: clampInt(Number(m?.maxTurns ?? 10), 1, 50),
+        a: normName(m?.a),
+        b: normName(m?.b),
+        winner: normName(m?.winner),
+        checkout100: Boolean(m?.checkout100),
+      }));
 
-        const rebuys: RebuyMatch[] = (s?.rebuys ?? []).map((r: any) => ({
-          id: normName(r?.id) || uid("rb"),
-          buyer: normName(r?.buyer),
-          a: normName(r?.a),
-          b: normName(r?.b),
-          winner: normName(r?.winner),
-          createdAt: Number(r?.createdAt ?? Date.now()),
-        }));
+      const rebuys: RebuyMatch[] = (s?.rebuys ?? []).map((r: any) => ({
+        id: normName(r?.id) || uid("rb"),
+        buyer: normName(r?.buyer),
+        a: normName(r?.a),
+        b: normName(r?.b),
+        winner: normName(r?.winner),
+        createdAt: Number(r?.createdAt ?? Date.now()),
+      }));
 
-        const paymentsRaw = s?.payments && typeof s.payments === "object" ? s.payments : {};
-        const payments: Record<string, boolean> = {};
-        for (const p of poolsA.concat(poolsB)) {
-          payments[p] = Boolean(paymentsRaw[p]);
-        }
-
-        return {
-          id: normName(s?.id) || uid("s"),
-          number: clampInt(Number(s?.number ?? idx + 1), 1, 999),
-          dateLabel: normName(s?.dateLabel) || undefined,
-          createdAt: Number(s?.createdAt ?? Date.now()),
-          pools: { A: poolsA, B: poolsB },
-          matches: matches.sort((a: CoreMatch, b: CoreMatch) => a.order - b.order),
-          rebuys: rebuys.sort((a: RebuyMatch, b: RebuyMatch) => a.createdAt - b.createdAt),
-          payments,
-          financeNotes: normName(s?.financeNotes) || "",
-          qualifiersOverride:
-            s?.qualifiersOverride && typeof s.qualifiersOverride === "object"
-              ? {
-                  A1: normName(s.qualifiersOverride.A1),
-                  A2: normName(s.qualifiersOverride.A2),
-                  B1: normName(s.qualifiersOverride.B1),
-                  B2: normName(s.qualifiersOverride.B2),
-                }
-              : undefined,
-        };
-      });
-
-      const inferredPlayers = players.length
-        ? players
-        : uniq(
-            soirees.flatMap((s) => [
-              ...s.pools.A,
-              ...s.pools.B,
-              ...s.matches.flatMap((m) => [m.a, m.b, m.winner]),
-              ...s.rebuys.flatMap((r) => [r.buyer, r.a, r.b, r.winner]),
-            ])
-          ).filter(isNonEmptyString);
-
-      const seasonSan: Season = {
-        id: normName(season?.id) || uid("season"),
-        name: normName(season?.name) || `Saison ${i + 1}`,
-        players: inferredPlayers,
-        soirees,
+      return {
+        id: normName(s?.id) || uid("s"),
+        number: clampInt(Number(s?.number ?? i + 1), 1, 999),
+        dateLabel: normName(s?.dateLabel) || undefined,
+        createdAt: Number(s?.createdAt ?? Date.now()),
+        pools: { A: poolsA, B: poolsB },
+        matches: matches.sort((a, b) => a.order - b.order),
+        rebuys: rebuys.sort((a, b) => a.createdAt - b.createdAt),
+        qualifiersOverride:
+          s?.qualifiersOverride && typeof s.qualifiersOverride === "object"
+            ? {
+                A1: normName(s.qualifiersOverride.A1),
+                A2: normName(s.qualifiersOverride.A2),
+                B1: normName(s.qualifiersOverride.B1),
+                B2: normName(s.qualifiersOverride.B2),
+              }
+            : undefined,
       };
+    });
 
-      if (!seasonSan.soirees.length) seasonSan.soirees = [makeEmptySoiree(1)];
-      return seasonSan;
+    const inferredPlayers = players.length
+      ? players
+      : uniq(
+          soirees.flatMap((s) => [
+            ...s.pools.A,
+            ...s.pools.B,
+            ...s.matches.flatMap((m) => [m.a, m.b, m.winner]),
+            ...s.rebuys.flatMap((r) => [r.buyer, r.a, r.b, r.winner]),
+          ])
+        ).filter(isNonEmptyString);
+
+    const seasonSan: Season = {
+      id: normName(season.id) || uid("season"),
+      name: normName(season.name) || "Saison 1",
+      players: inferredPlayers,
+      soirees,
     };
 
-    const seasons = seasonsRaw.length ? seasonsRaw.map(sanitizeSeason) : [makeEmptySeason("Saison 1")];
-    const activeSeasonId = normName(raw.activeSeasonId) || seasons[0].id;
-
-    const rawFunPlayers = uniq((raw.funMode?.players ?? []).map(normName)).filter(isNonEmptyString).slice(0, 8);
-    const rawFunMatches = Array.isArray(raw.funMode?.matches) ? raw.funMode.matches : [];
-    const rawFunFinals = Array.isArray(raw.funMode?.finals) ? raw.funMode.finals : [];
-    const rawPositionRounds = Array.isArray(raw.funMode?.positionRounds) ? raw.funMode.positionRounds : [];
-    const sanitizeFunMatch = (m: any, idx: number): CoreMatch => ({
+    const funPlayers = uniq((raw.funMode?.players ?? []).map(normName)).filter(isNonEmptyString).slice(0, 8);
+    const funMatchesRaw = Array.isArray(raw.funMode?.matches) ? raw.funMode.matches : [];
+    const funMatches: CoreMatch[] = funMatchesRaw.map((m: any, idx: number) => ({
       id: normName(m?.id) || uid("funm"),
       order: clampInt(Number(m?.order ?? idx + 1), 1, 9999),
-      phase: (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase,
+      phase: "POULE",
+      status:
+        m?.status === "PENDING" || m?.status === "VALIDATED" || m?.status === "CONTESTED"
+          ? m.status
+          : normName(m?.winner)
+            ? "VALIDATED"
+            : "PENDING",
       pool: null,
       format: Number(m?.format) === 501 ? 501 : 301,
       bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as "BO1" | "BO3" | "BO5" | "SEC",
@@ -621,31 +745,59 @@ function sanitizeState(raw: any): AppState {
       b: normName(m?.b),
       winner: normName(m?.winner),
       checkout100: Boolean(m?.checkout100),
-      checkoutBy: m?.checkoutBy === "A" || m?.checkoutBy === "B" ? m.checkoutBy : "",
-    });
-    const funMatches: CoreMatch[] = rawFunMatches.map(sanitizeFunMatch);
-    const funFinals: CoreMatch[] = rawFunFinals.map(sanitizeFunMatch);
-    const funPositionRounds: Array<{ id: string; positions: string[] }> = rawPositionRounds.map((r: any, idx: number) => ({
-      id: normName(r?.id) || uid(`fpr_${idx + 1}`),
-      positions: Array.isArray(r?.positions) ? r.positions.map(normName).filter(isNonEmptyString) : [],
     }));
+
+    if (!seasonSan.soirees.length) seasonSan.soirees = [seedSoiree1()];
+
+    const profileRaw = normName(raw.system?.rulesProfile);
+    const rulesProfile: RulesProfile =
+      profileRaw === "FUN" || profileRaw === "CUSTOM" || profileRaw === "STANDARD" ? profileRaw : "STANDARD";
+    const customRulesRaw = raw.system?.customRules ?? {};
+    const customRules: RulesConfig = {
+      winPoints: clampInt(Number(customRulesRaw.winPoints ?? STANDARD_RULES.winPoints), 0, 20),
+      smallFinalPoints: clampInt(Number(customRulesRaw.smallFinalPoints ?? STANDARD_RULES.smallFinalPoints), 0, 20),
+      checkoutBonusPoints: clampInt(Number(customRulesRaw.checkoutBonusPoints ?? STANDARD_RULES.checkoutBonusPoints), 0, 10),
+      jackpotPerPlayerEUR: Math.max(0, Number(customRulesRaw.jackpotPerPlayerEUR ?? STANDARD_RULES.jackpotPerPlayerEUR)),
+      rebuyEUR: Math.max(0, Number(customRulesRaw.rebuyEUR ?? STANDARD_RULES.rebuyEUR)),
+      rebuyWinPointsS1S2: clampInt(Number(customRulesRaw.rebuyWinPointsS1S2 ?? STANDARD_RULES.rebuyWinPointsS1S2), 0, 20),
+      rebuyFirstWinPointsS3Plus: clampInt(
+        Number(customRulesRaw.rebuyFirstWinPointsS3Plus ?? STANDARD_RULES.rebuyFirstWinPointsS3Plus),
+        0,
+        20
+      ),
+      rebuyNextWinPointsS3Plus: clampInt(
+        Number(customRulesRaw.rebuyNextWinPointsS3Plus ?? STANDARD_RULES.rebuyNextWinPointsS3Plus),
+        0,
+        20
+      ),
+      defaultPoolFormat: Number(customRulesRaw.defaultPoolFormat) === 501 ? 501 : 301,
+      defaultFinalFormat: Number(customRulesRaw.defaultFinalFormat) === 301 ? 301 : 501,
+    };
+    const audit: AuditEntry[] = Array.isArray(raw.system?.audit)
+      ? raw.system.audit
+          .map((x: any) => ({
+            id: normName(x?.id) || uid("audit"),
+            ts: Number(x?.ts ?? Date.now()),
+            action: normName(x?.action) || "Action",
+            details: normName(x?.details) || undefined,
+          }))
+          .sort((a, b) => b.ts - a.ts)
+          .slice(0, 300)
+      : [];
 
     return {
       version: v || VERSION,
-      seasons,
-      activeSeasonId,
+      season: seasonSan,
       funMode: {
-        players: rawFunPlayers,
-        format: Number(raw.funMode?.format) === 501 ? 501 : 301,
-        moneyEnabled: Boolean(raw.funMode?.moneyEnabled),
-        moneyPerPlayer: Math.max(0, Number(raw.funMode?.moneyPerPlayer ?? 0)),
+        players: funPlayers,
         matches: funMatches
-          .filter((m) => m.phase === "POULE" && m.a && m.b && rawFunPlayers.includes(m.a) && rawFunPlayers.includes(m.b))
+          .filter((m) => m.a && m.b && funPlayers.includes(m.a) && funPlayers.includes(m.b))
           .sort((a, b) => a.order - b.order),
-        finals: funFinals
-          .filter((m) => m.phase !== "POULE")
-          .sort((a, b) => a.order - b.order),
-        positionRounds: funPositionRounds,
+      },
+      system: {
+        rulesProfile,
+        customRules,
+        audit,
       },
     };
   } catch {
@@ -721,7 +873,7 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_20px_60px_rgba(0,0,0,0.25)] backdrop-blur">
+    <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-sm">
       <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <h2 className="text-base font-semibold text-white">{title}</h2>
         {right}
@@ -789,14 +941,9 @@ function Select({
 export default function App() {
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState<AppState>(() => loadState());
-  const [tab, setTab] = useState<
-    "SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "FUN" | "H2H" | "FINANCES" | "PARAMS" | "SAISONS"
-  >("SOIREE");
-  const [tvMode, setTvMode] = useState(false);
-  const [, setTvIndex] = useState(0);
-  const [timelinePlay, setTimelinePlay] = useState(false);
-  const [timelineStep, setTimelineStep] = useState(0);
-  const [timelineSpeedMs, setTimelineSpeedMs] = useState(1200);
+  const [tab, setTab] = useState<"SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "FUN" | "H2H" | "ARBITRAGE" | "PARAMS">(
+    "SOIREE"
+  );
   const [compactMode, setCompactMode] = useState<boolean>(() => {
     try {
       return localStorage.getItem("dl_compact_mode") === "1";
@@ -804,31 +951,24 @@ export default function App() {
       return false;
     }
   });
-  const [cardsMode, setCardsMode] = useState<boolean>(true);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [showExport, setShowExport] = useState(false);
   const [exportText, setExportText] = useState("");
-  const [newPlayerName, setNewPlayerName] = useState("");
-  const [bulkPlayersText, setBulkPlayersText] = useState("");
-  const [editingPlayer, setEditingPlayer] = useState<string | null>(null);
-  const [editingPlayerName, setEditingPlayerName] = useState("");
-  const [newSeasonName, setNewSeasonName] = useState("");
-  const [copyPlayersForNewSeason, setCopyPlayersForNewSeason] = useState(true);
+  const [snapshots, setSnapshots] = useState<SnapshotEntry[]>(() => loadSnapshots());
+  const [readOnlyLink, setReadOnlyLink] = useState("");
   const [funPlayerInput, setFunPlayerInput] = useState("");
-  const [funLiveEnabled, setFunLiveEnabled] = useState(false);
-  const [funLiveIndex, setFunLiveIndex] = useState(0);
-  const currentSeasons: Season[] = state.seasons;
   const [selectedSoireeNumber, setSelectedSoireeNumber] = useState<number>(() => {
-    const max = Math.max(...currentSeasons[0].soirees.map((s: Soiree) => s.number));
+    const max = Math.max(...state.season.soirees.map((s) => s.number));
     return max;
   });
 
   const savingRef = useRef<number | null>(null);
-
-  const currentSeason = useMemo<Season>(() => {
-    return currentSeasons.find((s: Season) => s.id === state.activeSeasonId) ?? currentSeasons[0];
-  }, [currentSeasons, state.activeSeasonId]);
+  const undoStackRef = useRef<AppState[]>([]);
+  const redoStackRef = useRef<AppState[]>([]);
+  const historyNavRef = useRef(false);
+  const lastSerializedRef = useRef(JSON.stringify(state));
+  const lastAutoSnapRef = useRef<number>(0);
 
   useEffect(() => {
     if (savingRef.current) window.clearTimeout(savingRef.current);
@@ -841,36 +981,76 @@ export default function App() {
   }, [state]);
 
   useEffect(() => {
+    const currentSerialized = JSON.stringify(state);
+    if (historyNavRef.current) {
+      historyNavRef.current = false;
+      lastSerializedRef.current = currentSerialized;
+      return;
+    }
+    if (currentSerialized !== lastSerializedRef.current) {
+      undoStackRef.current.push(sanitizeState(JSON.parse(lastSerializedRef.current)));
+      if (undoStackRef.current.length > 60) undoStackRef.current = undoStackRef.current.slice(-60);
+      redoStackRef.current = [];
+      lastSerializedRef.current = currentSerialized;
+    }
+
+    const now = Date.now();
+    if (now - lastAutoSnapRef.current > 1000 * 60 * 5) {
+      const snap: SnapshotEntry = {
+        id: uid("snap"),
+        ts: now,
+        label: `Auto ${new Date(now).toLocaleString("fr-FR")}`,
+        state: sanitizeState(JSON.parse(currentSerialized)),
+      };
+      const next = [snap, ...snapshots].slice(0, MAX_SNAPSHOTS);
+      setSnapshots(next);
+      saveSnapshots(next);
+      lastAutoSnapRef.current = now;
+    }
+  }, [state, snapshots]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const hash = window.location.hash || "";
+    if (!hash.startsWith("#readonly=")) return;
+    try {
+      const encoded = hash.slice("#readonly=".length);
+      const decoded = decodeURIComponent(escape(atob(encoded)));
+      const parsed = JSON.parse(decoded);
+      setState(sanitizeState(parsed));
+      setTab("CLASSEMENT");
+    } catch {}
+  }, []);
+
+  useEffect(() => {
     try {
       localStorage.setItem("dl_compact_mode", compactMode ? "1" : "0");
     } catch {}
   }, [compactMode]);
 
   useEffect(() => {
-    if (!currentSeasons.find((s: Season) => s.id === state.activeSeasonId)) {
-      setState((prev) => ({ ...prev, activeSeasonId: prev.seasons[0]?.id ?? prev.activeSeasonId }));
-    }
-  }, [state.activeSeasonId, currentSeasons]);
-
-  useEffect(() => {
-    const exists = currentSeason.soirees.some((s: Soiree) => s.number === selectedSoireeNumber);
+    const exists = state.season.soirees.some((s) => s.number === selectedSoireeNumber);
     if (!exists) {
-      const max = Math.max(...currentSeason.soirees.map((s: Soiree) => s.number));
+      const max = Math.max(...state.season.soirees.map((s) => s.number));
       setSelectedSoireeNumber(max);
     }
-  }, [currentSeason.soirees, selectedSoireeNumber]);
+  }, [state.season.soirees, selectedSoireeNumber]);
 
-  const seasonStats = useMemo(() => aggregateSeasonStats(currentSeason), [currentSeason]);
-  const jackpotEUR = useMemo(() => computeJackpotEUR(currentSeason), [currentSeason]);
-  const streaks = useMemo(() => computeWinStreaks(currentSeason), [currentSeason]);
-  const h2h = useMemo(() => computeHeadToHead(currentSeason), [currentSeason]);
-  const advancedStats = useMemo(() => computeAdvancedStats(currentSeason), [currentSeason]);
+  const effectiveRules = useMemo(
+    () => getRules(state.system.rulesProfile, state.system.customRules),
+    [state.system.rulesProfile, state.system.customRules]
+  );
+  const seasonStats = useMemo(() => aggregateSeasonStats(state.season, effectiveRules), [state.season, effectiveRules]);
+  const jackpotEUR = useMemo(() => computeJackpotEUR(state.season, effectiveRules), [state.season, effectiveRules]);
+  const streaks = useMemo(() => computeWinStreaks(state.season), [state.season]);
+  const h2h = useMemo(() => computeHeadToHead(state.season), [state.season]);
+  const diagnostics = useMemo(() => runSeasonDiagnostics(state.season), [state.season]);
 
   const playerColors = useMemo(() => {
     const map = new Map<string, string>();
-    currentSeason.players.forEach((p: string, i: number) => map.set(p, PALETTE[i % PALETTE.length]));
+    state.season.players.forEach((p, i) => map.set(p, PALETTE[i % PALETTE.length]));
     return map;
-  }, [currentSeason.players]);
+  }, [state.season.players]);
 
   const getPlayerColor = (name: string) => {
     const norm = normName(name);
@@ -879,47 +1059,43 @@ export default function App() {
   };
 
   const currentSoiree = useMemo(() => {
-    return currentSeason.soirees.find((s: Soiree) => s.number === selectedSoireeNumber) ?? currentSeason.soirees[0];
-  }, [currentSeason.soirees, selectedSoireeNumber]);
+    return state.season.soirees.find((s) => s.number === selectedSoireeNumber) ?? state.season.soirees[0];
+  }, [state.season.soirees, selectedSoireeNumber]);
 
 
   const currentPoolStandings = useMemo(() => {
-    const poolMatches = currentSoiree.matches.filter((m: CoreMatch) => m.phase === "POULE");
+    const poolMatches = currentSoiree.matches.filter((m) => m.phase === "POULE");
 
     const calcPool = (pool: "A" | "B") => {
       const players = currentSoiree.pools[pool];
-      const relevant = poolMatches.filter((m: CoreMatch) => m.pool === pool);
+      const relevant = poolMatches.filter((m) => m.pool === pool);
 
-      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
+      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, state.season, effectiveRules);
 
-      const rows = players.map((p: string) => ({
+      const rows = players.map((p) => ({
         name: p,
         pts: pts.get(p) ?? 0,
         wins: wins.get(p) ?? 0,
         bonus: bonus.get(p) ?? 0,
       }));
 
-      rows.sort((a: { name: string; pts: number; wins: number; bonus: number }, b: { name: string; pts: number; wins: number; bonus: number }) =>
-        b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name)
-      );
+      rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name));
       return rows;
     };
 
     return { A: calcPool("A"), B: calcPool("B") };
-  }, [currentSoiree.matches, currentSoiree.pools, currentSoiree.number, currentSeason]);
+  }, [currentSoiree.matches, currentSoiree.pools, currentSoiree.number, state.season]);
 
   const allSoireeNumbers = useMemo(() => {
-    return [...currentSeason.soirees].map((s: Soiree) => s.number).sort((a: number, b: number) => a - b);
-  }, [currentSeason.soirees]);
+    return [...state.season.soirees].map((s) => s.number).sort((a, b) => a - b);
+  }, [state.season.soirees]);
 
   const funStandings = useMemo(() => {
     const wins = new Map<string, number>();
     const played = new Map<string, number>();
-    const posPts = new Map<string, number>();
     state.funMode.players.forEach((p) => {
       wins.set(p, 0);
       played.set(p, 0);
-      posPts.set(p, 0);
     });
 
     for (const m of state.funMode.matches) {
@@ -932,103 +1108,96 @@ export default function App() {
       if (w && (w === a || w === b)) wins.set(w, (wins.get(w) ?? 0) + 1);
     }
 
-    for (const round of state.funMode.positionRounds) {
-      const seen = new Set<string>();
-      round.positions.forEach((p, idx) => {
-        const name = normName(p);
-        if (!name || seen.has(name) || !state.funMode.players.includes(name)) return;
-        seen.add(name);
-        const points = Math.max(0, state.funMode.players.length - idx);
-        posPts.set(name, (posPts.get(name) ?? 0) + points);
-      });
-    }
-
     const rows = state.funMode.players.map((p) => ({
       name: p,
       wins: wins.get(p) ?? 0,
       played: played.get(p) ?? 0,
-      posPts: posPts.get(p) ?? 0,
-      total: (wins.get(p) ?? 0) * 3 + (posPts.get(p) ?? 0),
     }));
-    rows.sort((a, b) => b.total - a.total || b.wins - a.wins || a.name.localeCompare(b.name));
+    rows.sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name));
     return rows;
-  }, [state.funMode.players, state.funMode.matches, state.funMode.positionRounds]);
-
-  const funPodium = useMemo(() => {
-    const final = state.funMode.finals.find((m) => m.phase === "FINAL");
-    const pfinal = state.funMode.finals.find((m) => m.phase === "PFINAL");
-    const wFinal = normName(final?.winner ?? "");
-    const aFinal = normName(final?.a ?? "");
-    const bFinal = normName(final?.b ?? "");
-    const second = wFinal && (wFinal === aFinal || wFinal === bFinal) ? (wFinal === aFinal ? bFinal : aFinal) : "";
-    const third = normName(pfinal?.winner ?? "");
-    if (wFinal && second && third) return { first: wFinal, second, third, provisional: false as const };
-    return {
-      first: funStandings[0]?.name ?? "",
-      second: funStandings[1]?.name ?? "",
-      third: funStandings[2]?.name ?? "",
-      provisional: true as const,
-    };
-  }, [state.funMode.finals, funStandings]);
-
-  const funPotEUR = useMemo(() => {
-    if (!state.funMode.moneyEnabled) return 0;
-    return state.funMode.players.length * state.funMode.moneyPerPlayer;
-  }, [state.funMode.moneyEnabled, state.funMode.players.length, state.funMode.moneyPerPlayer]);
-
-  const funLiveMatches = useMemo(() => {
-    const pool = state.funMode.matches
-      .slice()
-      .sort((a, b) => a.order - b.order)
-      .map((m) => ({ ...m, _src: "POOL" as const }));
-    const finals = state.funMode.finals
-      .slice()
-      .sort((a, b) => a.order - b.order)
-      .map((m) => ({ ...m, _src: "FINAL" as const }));
-    return [...pool, ...finals];
-  }, [state.funMode.matches, state.funMode.finals]);
-
-  const currentLiveMatch = funLiveMatches[funLiveIndex];
-
-  useEffect(() => {
-    if (funLiveIndex > Math.max(0, funLiveMatches.length - 1)) {
-      setFunLiveIndex(Math.max(0, funLiveMatches.length - 1));
-    }
-  }, [funLiveIndex, funLiveMatches.length]);
-
-  const tvTabs: Array<"SOIREE" | "CLASSEMENT" | "H2H"> = ["SOIREE", "CLASSEMENT", "H2H"];
-  const tvLabels: Record<string, string> = {
-    SOIREE: "Soirée",
-    CLASSEMENT: "Classement",
-    H2H: "Confrontations",
-  };
-
-  useEffect(() => {
-    if (!tvMode) return;
-    const idx = tvTabs.indexOf(tab as (typeof tvTabs)[number]);
-    setTvIndex(idx >= 0 ? idx : 0);
-  }, [tvMode, tab]);
-
-  useEffect(() => {
-    if (!tvMode) return;
-    const handle = window.setInterval(() => {
-      setTvIndex((prev) => {
-        const next = (prev + 1) % tvTabs.length;
-        setTab(tvTabs[next]);
-        return next;
-      });
-    }, 12000);
-    return () => window.clearInterval(handle);
-  }, [tvMode, tvTabs.length]);
+  }, [state.funMode.players, state.funMode.matches]);
 
   function updateSeason(mutator: (season: Season) => Season) {
-    setState((prev) => {
-      const seasons = prev.seasons.map((s) => (s.id === prev.activeSeasonId ? mutator(s) : s));
-      return { ...prev, seasons };
-    });
+    setState((prev) => ({ ...prev, season: mutator(prev.season) }));
   }
 
-  function updateFunMode(mutator: (funMode: FunModeState) => FunModeState) {
+  function updateSystem(mutator: (system: AppState["system"]) => AppState["system"]) {
+    setState((prev) => ({ ...prev, system: mutator(prev.system) }));
+  }
+
+  function logAudit(action: string, details?: string) {
+    updateSystem((system) => ({
+      ...system,
+      audit: [{ id: uid("audit"), ts: Date.now(), action, details }, ...system.audit].slice(0, 300),
+    }));
+  }
+
+  function createSnapshot(label = "Manuel") {
+    const snap: SnapshotEntry = {
+      id: uid("snap"),
+      ts: Date.now(),
+      label,
+      state: sanitizeState(JSON.parse(JSON.stringify(state))),
+    };
+    const next = [snap, ...snapshots].slice(0, MAX_SNAPSHOTS);
+    setSnapshots(next);
+    saveSnapshots(next);
+    logAudit("Snapshot créé", label);
+  }
+
+  function restoreSnapshot(snapshotId: string) {
+    const snap = snapshots.find((x) => x.id === snapshotId);
+    if (!snap) return;
+    historyNavRef.current = true;
+    setState(sanitizeState(snap.state));
+    logAudit("Snapshot restauré", snap.label);
+  }
+
+  function undoLastAction() {
+    const prev = undoStackRef.current.pop();
+    if (!prev) return;
+    redoStackRef.current.push(sanitizeState(JSON.parse(JSON.stringify(state))));
+    historyNavRef.current = true;
+    setState(sanitizeState(prev));
+    logAudit("Undo");
+  }
+
+  function redoLastAction() {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current.push(sanitizeState(JSON.parse(JSON.stringify(state))));
+    historyNavRef.current = true;
+    setState(sanitizeState(next));
+    logAudit("Redo");
+  }
+
+  function exportSeasonSummaryText() {
+    const lines: string[] = [];
+    lines.push(`Résumé ${state.season.name}`);
+    lines.push(`Date: ${new Date().toLocaleString("fr-FR")}`);
+    lines.push("");
+    lines.push("Classement général:");
+    seasonStats.table.forEach((r, i) => lines.push(`${i + 1}. ${r.name} - ${r.pts} pts (${r.wins}V)`));
+    lines.push("");
+    lines.push(`Jackpot: ${formatEUR(jackpotEUR)}`);
+    lines.push(`Soirées: ${state.season.soirees.length}`);
+    const txt = lines.join("\n");
+    downloadTextFile(`resume_${state.season.name.replace(/\s+/g, "_")}.txt`, txt, "text/plain;charset=utf-8");
+    logAudit("Export résumé soirée");
+  }
+
+  async function generateReadOnlyLink() {
+    const serialized = JSON.stringify(state);
+    const encoded = btoa(unescape(encodeURIComponent(serialized)));
+    const url = `${window.location.origin}${window.location.pathname}#readonly=${encoded}`;
+    setReadOnlyLink(url);
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {}
+    logAudit("Lien lecture seule généré");
+  }
+
+  function updateFunMode(mutator: (fun: FunModeState) => FunModeState) {
     setState((prev) => ({ ...prev, funMode: mutator(prev.funMode) }));
   }
 
@@ -1037,7 +1206,7 @@ export default function App() {
     if (!name) return;
     updateFunMode((fun) => {
       if (fun.players.includes(name) || fun.players.length >= 8) return fun;
-      return { ...fun, players: [...fun.players, name], matches: [], finals: [], positionRounds: [] };
+      return { ...fun, players: [...fun.players, name], matches: [] };
     });
     setFunPlayerInput("");
   }
@@ -1047,8 +1216,6 @@ export default function App() {
       ...fun,
       players: fun.players.filter((p) => p !== name),
       matches: [],
-      finals: [],
-      positionRounds: [],
     }));
   }
 
@@ -1056,286 +1223,25 @@ export default function App() {
     updateFunMode((fun) => {
       const players = fun.players.slice(0, 8);
       if (players.length < 2) return fun;
-      return {
-        ...fun,
-        matches: buildRoundRobinMatches(players, fun.format),
-        finals: [],
-        positionRounds: [],
-      };
-    });
-  }
-
-  function setFunMatchWinner(matchId: string, winner: string) {
-    updateFunMode((fun) => {
-      const matches: CoreMatch[] = fun.matches.map((m): CoreMatch => {
-        if (m.id !== matchId) return m;
-        const w = normName(winner);
-        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" as const };
-      });
+      const matches = buildRoundRobinMatches(players);
       return { ...fun, matches };
     });
   }
 
   function resetFunMode() {
-    updateFunMode(() => makeEmptyFunMode());
+    updateFunMode(() => ({ players: [], matches: [] }));
     setFunPlayerInput("");
   }
 
-  function setFunFormat(format: 301 | 501) {
-    updateFunMode((fun) => ({
-      ...fun,
-      format,
-      matches: fun.matches.map((m) => ({ ...m, format })),
-      finals: fun.finals.map((m) => ({ ...m, format })),
-    }));
-  }
-
-  function generateFunFinals() {
+  function setFunMatchWinner(matchId: string, winner: string) {
     updateFunMode((fun) => {
-      if (funStandings.length < 4) return fun;
-      const top4 = funStandings.slice(0, 4).map((r) => r.name);
-      const finals: CoreMatch[] = [
-        { id: uid("ff"), order: 1, phase: "DEMI", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[0], b: top4[3], winner: "", checkout100: false, checkoutBy: "" },
-        { id: uid("ff"), order: 2, phase: "DEMI", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[1], b: top4[2], winner: "", checkout100: false, checkoutBy: "" },
-        { id: uid("ff"), order: 3, phase: "PFINAL", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
-        { id: uid("ff"), order: 4, phase: "FINAL", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
-      ];
-      return { ...fun, finals };
-    });
-  }
-
-  function setFunFinalWinner(matchId: string, winner: string) {
-    updateFunMode((fun) => {
-      const finals = fun.finals.map((m) => {
+      const matches = fun.matches.map((m) => {
         if (m.id !== matchId) return m;
         const w = normName(winner);
-        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" as const };
+        const valid = w === m.a || w === m.b;
+        return { ...m, winner: valid ? w : "", status: valid ? "VALIDATED" : "PENDING", checkout100: false };
       });
-
-      const demis = finals.filter((m) => m.phase === "DEMI").sort((a, b) => a.order - b.order);
-      const final = finals.find((m) => m.phase === "FINAL");
-      const pfinal = finals.find((m) => m.phase === "PFINAL");
-      if (demis.length === 2 && final && pfinal) {
-        const d1 = demis[0];
-        const d2 = demis[1];
-        const w1 = normName(d1.winner);
-        const w2 = normName(d2.winner);
-        const l1 = w1 === d1.a ? d1.b : w1 === d1.b ? d1.a : "";
-        const l2 = w2 === d2.a ? d2.b : w2 === d2.b ? d2.a : "";
-        final.a = w1 && w2 ? w1 : "";
-        final.b = w1 && w2 ? w2 : "";
-        if (final.winner && final.winner !== final.a && final.winner !== final.b) final.winner = "";
-        pfinal.a = l1 && l2 ? l1 : "";
-        pfinal.b = l1 && l2 ? l2 : "";
-        if (pfinal.winner && pfinal.winner !== pfinal.a && pfinal.winner !== pfinal.b) pfinal.winner = "";
-      }
-      return { ...fun, finals: [...finals] };
-    });
-  }
-
-  function addFunPositionRound() {
-    updateFunMode((fun) => ({
-      ...fun,
-      positionRounds: [...fun.positionRounds, { id: uid("fpr"), positions: Array(fun.players.length).fill("") }],
-    }));
-  }
-
-  function deleteFunPositionRound(id: string) {
-    updateFunMode((fun) => ({
-      ...fun,
-      positionRounds: fun.positionRounds.filter((r) => r.id !== id),
-    }));
-  }
-
-  function setFunRoundPosition(roundId: string, index: number, player: string) {
-    updateFunMode((fun) => {
-      const selected = normName(player);
-      const positionRounds = fun.positionRounds.map((r) => {
-        if (r.id !== roundId) return r;
-        const positions = [...r.positions];
-        if (selected) {
-          for (let i = 0; i < positions.length; i++) {
-            if (i !== index && positions[i] === selected) positions[i] = "";
-          }
-        }
-        positions[index] = selected;
-        return { ...r, positions };
-      });
-      return { ...fun, positionRounds };
-    });
-  }
-
-  function setLiveWinner(matchId: string, source: "POOL" | "FINAL", winner: string) {
-    if (source === "POOL") {
-      setFunMatchWinner(matchId, winner);
-    } else {
-      setFunFinalWinner(matchId, winner);
-    }
-  }
-
-  function goToNextPendingLiveMatch() {
-    if (!funLiveMatches.length) return;
-    const idx = funLiveMatches.findIndex((m) => !normName(m.winner) && m.a && m.b);
-    if (idx >= 0) setFunLiveIndex(idx);
-  }
-
-  function updateFinancePayment(player: string, paid: boolean) {
-    updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
-        if (s.number !== currentSoiree.number) return s;
-        const payments = { ...(s.payments ?? {}) };
-        payments[player] = paid;
-        return { ...s, payments };
-      });
-      return { ...season, soirees };
-    });
-  }
-
-  function updateFinanceNotes(notes: string) {
-    updateSeason((season) => {
-      const soirees = season.soirees.map((s) =>
-        s.number === currentSoiree.number ? { ...s, financeNotes: notes } : s
-      );
-      return { ...season, soirees };
-    });
-  }
-
-  function updateFinanceAll(paid: boolean) {
-    const players = uniq([...currentSoiree.pools.A, ...currentSoiree.pools.B]).filter(isNonEmptyString);
-    updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
-        if (s.number !== currentSoiree.number) return s;
-        const payments = { ...(s.payments ?? {}) };
-        players.forEach((p) => {
-          payments[p] = paid;
-        });
-        return { ...s, payments };
-      });
-      return { ...season, soirees };
-    });
-  }
-
-  function addPlayer(nameRaw: string) {
-    const name = normName(nameRaw);
-    if (!name) return;
-    updateSeason((season) => {
-      if (season.players.includes(name)) return season;
-      return { ...season, players: [...season.players, name] };
-    });
-  }
-
-  function addPlayersFromBulk(text: string) {
-    const names = uniq(
-      text
-        .split(/[\n,;]/g)
-        .map((x) => normName(x))
-        .filter(isNonEmptyString)
-    );
-    if (!names.length) return;
-    updateSeason((season) => {
-      const merged = [...season.players];
-      for (const n of names) if (!merged.includes(n)) merged.push(n);
-      return { ...season, players: merged };
-    });
-  }
-
-  function removePlayer(name: string) {
-    updateSeason((season) => {
-      const players = season.players.filter((p) => p !== name);
-      const soirees = season.soirees.map((s) => ({
-        ...s,
-        pools: {
-          A: s.pools.A.filter((p) => p !== name),
-          B: s.pools.B.filter((p) => p !== name),
-        },
-        matches: s.matches.map((m) => ({
-          ...m,
-          a: m.a === name ? "" : m.a,
-          b: m.b === name ? "" : m.b,
-          winner: m.winner === name ? "" : m.winner,
-        })),
-        rebuys: s.rebuys.map((r) => ({
-          ...r,
-          buyer: r.buyer === name ? "" : r.buyer,
-          a: r.a === name ? "" : r.a,
-          b: r.b === name ? "" : r.b,
-          winner: r.winner === name ? "" : r.winner,
-        })),
-      }));
-      return { ...season, players, soirees };
-    });
-  }
-
-  function renamePlayer(oldName: string, newNameRaw: string) {
-    const newName = normName(newNameRaw);
-    if (!newName || newName === oldName) return;
-    updateSeason((season) => {
-      if (season.players.includes(newName)) return season;
-      const players = season.players.map((p) => (p === oldName ? newName : p));
-      const soirees = season.soirees.map((s) => ({
-        ...s,
-        pools: {
-          A: s.pools.A.map((p) => (p === oldName ? newName : p)),
-          B: s.pools.B.map((p) => (p === oldName ? newName : p)),
-        },
-        matches: s.matches.map((m) => ({
-          ...m,
-          a: m.a === oldName ? newName : m.a,
-          b: m.b === oldName ? newName : m.b,
-          winner: m.winner === oldName ? newName : m.winner,
-        })),
-        rebuys: s.rebuys.map((r) => ({
-          ...r,
-          buyer: r.buyer === oldName ? newName : r.buyer,
-          a: r.a === oldName ? newName : r.a,
-          b: r.b === oldName ? newName : r.b,
-          winner: r.winner === oldName ? newName : r.winner,
-        })),
-      }));
-      return { ...season, players, soirees };
-    });
-  }
-
-  function addSeason() {
-    setState((prev) => {
-      const name = normName(newSeasonName) || `Saison ${prev.seasons.length + 1}`;
-      const season = makeEmptySeason(name);
-      if (copyPlayersForNewSeason) season.players = [...currentSeason.players];
-      return {
-        ...prev,
-        seasons: [...prev.seasons, season],
-        activeSeasonId: season.id,
-      };
-    });
-    setSelectedSoireeNumber(1);
-    setNewSeasonName("");
-    setTab("SOIREE");
-  }
-
-  function setActiveSeason(id: string) {
-    setState((prev) => {
-      const season = prev.seasons.find((s) => s.id === id) ?? prev.seasons[0];
-      const max = Math.max(...season.soirees.map((s) => s.number));
-      setSelectedSoireeNumber(max);
-      return { ...prev, activeSeasonId: id };
-    });
-  }
-
-  function renameSeason(id: string, nameRaw: string) {
-    const name = normName(nameRaw);
-    if (!name) return;
-    setState((prev) => ({
-      ...prev,
-      seasons: prev.seasons.map((s) => (s.id === id ? { ...s, name } : s)),
-    }));
-  }
-
-  function deleteSeason(id: string) {
-    setState((prev) => {
-      if (prev.seasons.length <= 1) return prev;
-      const seasons = prev.seasons.filter((s) => s.id !== id);
-      const activeSeasonId = prev.activeSeasonId === id ? seasons[0].id : prev.activeSeasonId;
-      return { ...prev, seasons, activeSeasonId };
+      return { ...fun, matches };
     });
   }
 
@@ -1359,12 +1265,13 @@ export default function App() {
     setState(makeInitialState());
     setSelectedSoireeNumber(1);
     setTab("SOIREE");
+    logAudit("Reset complet");
   }
 
   function exportSeasonFile() {
     const payload = JSON.stringify(state, null, 2);
-    const safeName = (currentSeason.name || "Saison").split(" ").join("_");
-    const filename = "dark-league_" + safeName + "_soirees-" + String(currentSeason.soirees.length) + ".json";
+    const safeName = (state.season.name || "Saison").split(" ").join("_");
+    const filename = "dark-league_" + safeName + "_soirees-" + String(state.season.soirees.length) + ".json";
 
     try {
       downloadTextFile(filename, payload);
@@ -1372,6 +1279,7 @@ export default function App() {
 
     setExportText(payload);
     setShowExport(true);
+    logAudit("Export JSON fichier");
   }
 
   async function exportSeasonClipboard() {
@@ -1379,11 +1287,13 @@ export default function App() {
       const payload = JSON.stringify(state, null, 2);
       await navigator.clipboard.writeText(payload);
       alert("Export copié dans le presse-papiers ✅");
+      logAudit("Export JSON clipboard");
     } catch {
       const payload = JSON.stringify(state, null, 2);
       setExportText(payload);
       setShowExport(true);
       alert("Copie automatique bloquée. L’export s’affiche : copie/colle-le dans un fichier .json ✅");
+      logAudit("Export JSON fallback");
     }
   }
 
@@ -1392,12 +1302,12 @@ export default function App() {
       const parsed = JSON.parse(text);
       const next = sanitizeState(parsed);
       setState(next);
-      const active = next.seasons.find((s) => s.id === next.activeSeasonId) ?? next.seasons[0];
-      const max = Math.max(...active.soirees.map((s) => s.number));
+      const max = Math.max(...next.season.soirees.map((s) => s.number));
       setSelectedSoireeNumber(max);
       setTab("SOIREE");
       setShowImport(false);
       setImportText("");
+      logAudit("Import JSON");
     } catch {
       alert("Import impossible : JSON invalide.");
     }
@@ -1408,9 +1318,12 @@ export default function App() {
   }
 
   function startNewSoiree() {
-    if (currentSeason.players.length < 2) {
-      alert("Ajoute d’abord les joueurs (au moins 2).");
-      return;
+    const issues = runSeasonDiagnostics(state.season);
+    if (issues.length > 0) {
+      const proceed = window.confirm(
+        `Diagnostics: ${issues.length} anomalie(s) détectée(s).\n\n- ${issues.slice(0, 3).join("\n- ")}\n\nContinuer quand même ?`
+      );
+      if (!proceed) return;
     }
     updateSeason((season) => {
       const nextNumber = Math.max(...season.soirees.map((s) => s.number)) + 1;
@@ -1421,75 +1334,75 @@ export default function App() {
         const sh = shuffle(players);
         pools = { A: sh.slice(0, 4), B: sh.slice(4, 8) };
       } else {
-        const ranked = aggregateSeasonStats(season).table.map((x) => x.name);
+        const ranked = aggregateSeasonStats(season, effectiveRules).table.map((x) => x.name);
         pools = {
           A: [ranked[0], ranked[2], ranked[4], ranked[6]].filter(Boolean),
           B: [ranked[1], ranked[3], ranked[5], ranked[7]].filter(Boolean),
         };
       }
 
-          const poolA = poolMatchesFor4(pools.A, "A");
-          const poolB = poolMatchesFor4(pools.B, "B");
-          const inter = interleavePools(poolA, poolB);
+      const poolA = poolMatchesFor4(pools.A, "A");
+      const poolB = poolMatchesFor4(pools.B, "B");
+      const inter = interleavePools(poolA, poolB).map((m) => ({ ...m, format: effectiveRules.defaultPoolFormat }));
 
-          const finals: CoreMatch[] = [
-            {
-              id: uid("m"),
-              order: inter.length + 1,
-              phase: "DEMI",
-              pool: null,
-              format: 301,
-              bo: "BO3",
-              maxTurns: 10,
-              a: "",
-              b: "",
-              winner: "",
-              checkout100: false,
-              checkoutBy: "",
-            },
-            {
-              id: uid("m"),
-              order: inter.length + 2,
-              phase: "DEMI",
-              pool: null,
-              format: 301,
-              bo: "BO3",
-              maxTurns: 10,
-              a: "",
-              b: "",
-              winner: "",
-              checkout100: false,
-              checkoutBy: "",
-            },
-            {
-              id: uid("m"),
-              order: inter.length + 3,
-              phase: "PFINAL",
-              pool: null,
-              format: 301,
-              bo: "BO3",
-              maxTurns: 10,
-              a: "",
-              b: "",
-              winner: "",
-              checkout100: false,
-              checkoutBy: "",
-            },
-            {
-              id: uid("m"),
-              order: inter.length + 4,
-              phase: "FINAL",
-              pool: null,
-              format: 501,
-              bo: "BO3",
-              maxTurns: 10,
-              a: "",
-              b: "",
-              winner: "",
-              checkout100: false,
-              checkoutBy: "",
-            },
-          ];
+      const finals: CoreMatch[] = [
+        {
+          id: uid("m"),
+          order: inter.length + 1,
+          phase: "DEMI",
+          status: "PENDING",
+          pool: null,
+          format: effectiveRules.defaultPoolFormat,
+          bo: "BO3",
+          maxTurns: 10,
+          a: "",
+          b: "",
+          winner: "",
+          checkout100: false,
+        },
+        {
+          id: uid("m"),
+          order: inter.length + 2,
+          phase: "DEMI",
+          status: "PENDING",
+          pool: null,
+          format: effectiveRules.defaultPoolFormat,
+          bo: "BO3",
+          maxTurns: 10,
+          a: "",
+          b: "",
+          winner: "",
+          checkout100: false,
+        },
+        {
+          id: uid("m"),
+          order: inter.length + 3,
+          phase: "PFINAL",
+          status: "PENDING",
+          pool: null,
+          format: effectiveRules.defaultPoolFormat,
+          bo: "BO3",
+          maxTurns: 10,
+          a: "",
+          b: "",
+          winner: "",
+          checkout100: false,
+        },
+        {
+          id: uid("m"),
+          order: inter.length + 4,
+          phase: "FINAL",
+          status: "PENDING",
+          pool: null,
+          format: effectiveRules.defaultFinalFormat,
+          bo: "BO3",
+          maxTurns: 10,
+          a: "",
+          b: "",
+          winner: "",
+          checkout100: false,
+        },
+      ];
 
       const newSoiree: Soiree = {
         id: uid("s"),
@@ -1498,18 +1411,14 @@ export default function App() {
         pools,
         matches: [...inter, ...finals],
         rebuys: [],
-        payments: players.reduce((acc, p) => {
-          acc[p] = false;
-          return acc;
-        }, {} as Record<string, boolean>),
-        financeNotes: "",
       };
 
       return { ...season, soirees: [...season.soirees, newSoiree] };
     });
+    logAudit("Nouvelle soirée générée");
 
     setTimeout(() => {
-      const max = Math.max(...currentSeason.soirees.map((s: Soiree) => s.number)) + 1;
+      const max = Math.max(...state.season.soirees.map((s) => s.number)) + 1;
       setSelectedSoireeNumber(max);
       setTab("SOIREE");
     }, 0);
@@ -1517,18 +1426,18 @@ export default function App() {
 
   function setMatchWinner(matchId: string, winner: string) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches: CoreMatch[] = s.matches.map((m: CoreMatch) => {
+        const matches = s.matches.map((m) => {
           if (m.id !== matchId) return m;
           const w = normName(winner);
           const valid = w && (w === normName(m.a) || w === normName(m.b));
           return {
             ...m,
             winner: valid ? w : "",
-            checkoutBy: !m.a || !m.b ? "" : m.checkoutBy,
-            checkout100: !m.a || !m.b ? false : Boolean(m.checkoutBy),
-          } as CoreMatch;
+            status: valid ? "VALIDATED" : "PENDING",
+            checkout100: valid ? m.checkout100 : false,
+          };
         });
         return { ...s, matches };
       });
@@ -1536,33 +1445,28 @@ export default function App() {
     });
   }
 
-  function setMatchCheckoutBy(matchId: string, checkoutBy: "" | "A" | "B") {
+  function setMatchStatus(matchId: string, status: MatchStatus) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches: CoreMatch[] = s.matches.map((m: CoreMatch) => {
-          if (m.id !== matchId) return m;
-          if (!m.a || !m.b) return { ...m, checkoutBy: "", checkout100: false };
-          const by: "" | "A" | "B" = checkoutBy;
-          return { ...m, checkoutBy: by, checkout100: Boolean(by) } as CoreMatch;
-        });
-        return { ...s, matches };
+        return {
+          ...s,
+          matches: s.matches.map((m) => (m.id === matchId ? { ...m, status } : m)),
+        };
       });
       return { ...season, soirees };
     });
+    logAudit("Statut match modifié", `${matchId} -> ${status}`);
   }
 
-  function swapMatchPlayers(matchId: string) {
+  function setMatchCheckout100(matchId: string, val: boolean) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m: CoreMatch) => {
+        const matches = s.matches.map((m) => {
           if (m.id !== matchId) return m;
-          const a = m.b;
-          const b = m.a;
-          const winner =
-            m.winner === m.a ? m.b : m.winner === m.b ? m.a : m.winner;
-          return { ...m, a, b, winner };
+          if (!normName(m.winner)) return { ...m, checkout100: false };
+          return { ...m, checkout100: Boolean(val) };
         });
         return { ...s, matches };
       });
@@ -1571,21 +1475,19 @@ export default function App() {
   }
 
   function recalcFinalsFromPools() {
-    const poolMatches = currentSoiree.matches.filter((m: CoreMatch) => m.phase === "POULE");
+    const poolMatches = currentSoiree.matches.filter((m) => m.phase === "POULE");
 
     const calcPool = (pool: "A" | "B") => {
       const players = currentSoiree.pools[pool];
-      const relevant = poolMatches.filter((m: CoreMatch) => m.pool === pool);
-      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
-      const rows = players.map((p: string) => ({
+      const relevant = poolMatches.filter((m) => m.pool === pool);
+      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, state.season, effectiveRules);
+      const rows = players.map((p) => ({
         name: p,
         pts: pts.get(p) ?? 0,
         wins: wins.get(p) ?? 0,
         bonus: bonus.get(p) ?? 0,
       }));
-      rows.sort((a: { name: string; pts: number; wins: number; bonus: number }, b: { name: string; pts: number; wins: number; bonus: number }) =>
-        b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name)
-      );
+      rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name));
       return rows;
     };
 
@@ -1599,21 +1501,21 @@ export default function App() {
     const B2 = ov.B2 || (B[1]?.name ?? "");
 
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
 
-        const demisSorted = s.matches
-          .filter((x: CoreMatch) => x.phase === "DEMI")
-          .sort((x: CoreMatch, y: CoreMatch) => x.order - y.order);
+        const demisSorted = s.matches.filter((x) => x.phase === "DEMI").sort((x, y) => x.order - y.order);
 
-        const matches = s.matches.map((m: CoreMatch) => {
+        const matches = s.matches.map((m) => {
           if (m.phase !== "DEMI") return m;
-          const demiIndex = demisSorted.findIndex((x: CoreMatch) => x.id === m.id);
+          const demiIndex = demisSorted.findIndex((x) => x.id === m.id);
           if (demiIndex === 0) {
-            return { ...m, a: A1, b: B2, winner: m.winner && (m.winner === A1 || m.winner === B2) ? m.winner : "" };
+            const winner = m.winner && (m.winner === A1 || m.winner === B2) ? m.winner : "";
+            return { ...m, a: A1, b: B2, winner, status: winner ? "VALIDATED" : "PENDING" };
           }
           if (demiIndex === 1) {
-            return { ...m, a: B1, b: A2, winner: m.winner && (m.winner === B1 || m.winner === A2) ? m.winner : "" };
+            const winner = m.winner && (m.winner === B1 || m.winner === A2) ? m.winner : "";
+            return { ...m, a: B1, b: A2, winner, status: winner ? "VALIDATED" : "PENDING" };
           }
           return m;
         });
@@ -1626,9 +1528,7 @@ export default function App() {
   }
 
   function recalcFinalAndPFinal() {
-    const demis = currentSoiree.matches
-      .filter((m: CoreMatch) => m.phase === "DEMI")
-      .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order);
+    const demis = currentSoiree.matches.filter((m) => m.phase === "DEMI").sort((a, b) => a.order - b.order);
     if (demis.length < 2) return;
 
     const d1 = demis[0];
@@ -1640,20 +1540,20 @@ export default function App() {
     const l2 = w2 ? (w2 === d2.a ? d2.b : w2 === d2.b ? d2.a : "") : "";
 
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m: CoreMatch) => {
+        const matches = s.matches.map((m) => {
           if (m.phase === "FINAL") {
             const a = w1 && w2 ? w1 : "";
             const b = w1 && w2 ? w2 : "";
             const keepWinner = m.winner && (m.winner === a || m.winner === b) ? m.winner : "";
-            return { ...m, a, b, winner: keepWinner };
+            return { ...m, a, b, winner: keepWinner, status: keepWinner ? "VALIDATED" : "PENDING" };
           }
           if (m.phase === "PFINAL") {
             const a = l1 && l2 ? l1 : "";
             const b = l1 && l2 ? l2 : "";
             const keepWinner = m.winner && (m.winner === a || m.winner === b) ? m.winner : "";
-            return { ...m, a, b, winner: keepWinner };
+            return { ...m, a, b, winner: keepWinner, status: keepWinner ? "VALIDATED" : "PENDING" };
           }
           return m;
         });
@@ -1665,7 +1565,7 @@ export default function App() {
 
   function addRebuy() {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
         const rb: RebuyMatch = {
           id: uid("rb"),
@@ -1683,9 +1583,9 @@ export default function App() {
 
   function updateRebuy(id: string, patch: Partial<RebuyMatch>) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        const rebuys = s.rebuys.map((r: RebuyMatch) => (r.id === id ? { ...r, ...patch } : r));
+        const rebuys = s.rebuys.map((r) => (r.id === id ? { ...r, ...patch } : r));
         return { ...s, rebuys };
       });
       return { ...season, soirees };
@@ -1694,17 +1594,17 @@ export default function App() {
 
   function deleteRebuy(id: string) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s: Soiree) => {
+      const soirees = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        return { ...s, rebuys: s.rebuys.filter((r: RebuyMatch) => r.id !== id) };
+        return { ...s, rebuys: s.rebuys.filter((r) => r.id !== id) };
       });
       return { ...season, soirees };
     });
   }
 
   const currentPodium = useMemo(() => {
-    const final = currentSoiree.matches.find((m: CoreMatch) => m.phase === "FINAL");
-    const pfinal = currentSoiree.matches.find((m: CoreMatch) => m.phase === "PFINAL");
+    const final = currentSoiree.matches.find((m) => m.phase === "FINAL");
+    const pfinal = currentSoiree.matches.find((m) => m.phase === "PFINAL");
 
     const wFinal = normName(final?.winner ?? "");
     const aFinal = normName(final?.a ?? "");
@@ -1716,15 +1616,13 @@ export default function App() {
     const third = normName(pfinal?.winner ?? "");
 
     if (!wFinal || !second || !third) {
-      const { pts, wins } = computePointsFromMatches(currentSoiree.matches, [], currentSoiree.number, currentSeason);
-      const rows = currentSeason.players.map((p: string) => ({
+      const { pts, wins } = computePointsFromMatches(currentSoiree.matches, [], currentSoiree.number, state.season, effectiveRules);
+      const rows = state.season.players.map((p) => ({
         name: p,
         pts: pts.get(p) ?? 0,
         wins: wins.get(p) ?? 0,
       }));
-      rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
-        b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
-      );
+      rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
       return {
         first: rows[0]?.name ?? "",
         second: rows[1]?.name ?? "",
@@ -1739,16 +1637,16 @@ export default function App() {
       third,
       provisional: false as const,
     };
-  }, [currentSoiree.matches, currentSoiree.number, currentSeason]);
+  }, [currentSoiree.matches, currentSoiree.number, state.season]);
 
 
   const totalGainsEUR = useMemo(() => {
     const totals = new Map<string, number>();
-    for (const p of currentSeason.players) totals.set(p, 0);
+    for (const p of state.season.players) totals.set(p, 0);
 
     const podiumFromSoiree = (s: Soiree) => {
-      const final = s.matches.find((m: CoreMatch) => m.phase === "FINAL");
-      const pfinal = s.matches.find((m: CoreMatch) => m.phase === "PFINAL");
+      const final = s.matches.find((m) => m.phase === "FINAL");
+      const pfinal = s.matches.find((m) => m.phase === "PFINAL");
 
       const wFinal = normName(final?.winner ?? "");
       const aFinal = normName(final?.a ?? "");
@@ -1758,40 +1656,38 @@ export default function App() {
       const third = normName(pfinal?.winner ?? "");
 
       if (!wFinal || !second || !third) {
-        const { pts, wins } = computePointsFromMatches(s.matches, [], s.number, currentSeason);
-        const rows = currentSeason.players.map((p: string) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
-        rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
-          b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
-        );
+        const { pts, wins } = computePointsFromMatches(s.matches, [], s.number, state.season, effectiveRules);
+        const rows = state.season.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
+        rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
         return { first: rows[0]?.name ?? "", second: rows[1]?.name ?? "", third: rows[2]?.name ?? "" };
       }
 
       return { first: wFinal, second, third };
     };
 
-    for (const s of currentSeason.soirees) {
+    for (const s of state.season.soirees) {
       const { first, second, third } = podiumFromSoiree(s);
       if (first) totals.set(first, (totals.get(first) ?? 0) + MONEY.podiumEUR.first);
       if (second) totals.set(second, (totals.get(second) ?? 0) + MONEY.podiumEUR.second);
       if (third) totals.set(third, (totals.get(third) ?? 0) + MONEY.podiumEUR.third);
     }
 
-    const out = currentSeason.players.map((p: string) => ({ player: p, eur: totals.get(p) ?? 0 }));
-    out.sort((a: { player: string; eur: number }, b: { player: string; eur: number }) => b.eur - a.eur || a.player.localeCompare(b.player));
+    const out = state.season.players.map((p) => ({ player: p, eur: totals.get(p) ?? 0 }));
+    out.sort((a, b) => b.eur - a.eur || a.player.localeCompare(b.player));
     return out;
-  }, [currentSeason.players, currentSeason.soirees]);
+  }, [state.season.players, state.season.soirees]);
 
   const rankingTimeline = useMemo(() => {
-    const players = currentSeason.players;
-    const soirees = [...currentSeason.soirees].sort((a: Soiree, b: Soiree) => a.number - b.number);
+    const players = state.season.players;
+    const soirees = [...state.season.soirees].sort((a, b) => a.number - b.number);
     const totals = new Map<string, { pts: number; wins: number; bonus: number }>();
-    players.forEach((p: string) => totals.set(p, { pts: 0, wins: 0, bonus: 0 }));
+    players.forEach((p) => totals.set(p, { pts: 0, wins: 0, bonus: 0 }));
 
     const series = new Map<string, number[]>();
-    players.forEach((p: string) => series.set(p, []));
+    players.forEach((p) => series.set(p, []));
 
     for (const s of soirees) {
-      const { pts, wins, bonus } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
+      const { pts, wins, bonus } = computePointsFromMatches(s.matches, s.rebuys, s.number, state.season, effectiveRules);
       for (const p of players) {
         const t = totals.get(p)!;
         totals.set(p, {
@@ -1802,142 +1698,61 @@ export default function App() {
       }
 
       const table = players
-        .map((p: string) => ({ name: p, ...(totals.get(p) ?? { pts: 0, wins: 0, bonus: 0 }) }))
-        .sort(
-          (
-            a: { name: string; pts: number; wins: number; bonus: number },
-            b: { name: string; pts: number; wins: number; bonus: number }
-          ) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name)
-        );
+        .map((p) => ({ name: p, ...(totals.get(p) ?? { pts: 0, wins: 0, bonus: 0 }) }))
+        .sort((a, b) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name));
 
-      table.forEach((row: { name: string }, idx: number) => {
+      table.forEach((row, idx) => {
         series.get(row.name)!.push(idx + 1);
       });
     }
 
     return {
-      labels: soirees.map((s: Soiree) => s.number),
-      series: players.map((p: string) => ({ player: p, ranks: series.get(p) ?? [] })),
+      labels: soirees.map((s) => s.number),
+      series: players.map((p) => ({ player: p, ranks: series.get(p) ?? [] })),
     };
-  }, [currentSeason.players, currentSeason.soirees]);
-
-  useEffect(() => {
-    const maxStep = Math.max(0, rankingTimeline.labels.length - 1);
-    if (timelineStep > maxStep) setTimelineStep(maxStep);
-  }, [rankingTimeline.labels.length, timelineStep]);
-
-  useEffect(() => {
-    if (!timelinePlay || rankingTimeline.labels.length === 0) return;
-    const handle = window.setInterval(() => {
-      setTimelineStep((prev) => {
-        const maxStep = Math.max(0, rankingTimeline.labels.length - 1);
-        return prev >= maxStep ? 0 : prev + 1;
-      });
-    }, timelineSpeedMs);
-    return () => window.clearInterval(handle);
-  }, [timelinePlay, timelineSpeedMs, rankingTimeline.labels.length]);
-
+  }, [state.season.players, state.season.soirees]);
 
   return (
-    <div className={`min-h-screen text-white app-shell ${tvMode ? "tv-mode" : ""}`}>
+    <div className="min-h-screen bg-[#0b0f17] text-white">
       <div className="mx-auto max-w-6xl px-4 pt-6 pb-24 md:pb-6">
         <div className="mb-6 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-          <div className="flex-1">
-            <div className="flex items-center gap-3">
-              <div className="h-11 w-11 rounded-2xl bg-white/10 grid place-items-center shadow-[0_0_30px_rgba(59,130,246,0.25)]">🎯</div>
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="h-10 w-10 rounded-2xl bg-white/10 grid place-items-center">🎯</div>
               <div>
-                <div className="text-[11px] uppercase tracking-[0.3em] text-white/50">Darts League</div>
-                <h1 className="text-2xl font-extrabold">Tableau de bord</h1>
-                <div className="mt-1 text-sm text-white/70">{currentSeason.name} • Sauvegarde locale</div>
+                <h1 className="text-lg font-bold sm:text-xl">DARTS LEAGUE — App (local)</h1>
+                <div className="mt-0.5 text-xs sm:text-sm text-white/70">
+                  {state.season.name} • Sauvegarde locale (Safari)
+                </div>
               </div>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <Pill color="#22c55e">Jackpot: {formatEUR(jackpotEUR)}</Pill>
-              <Pill>Joueurs: {currentSeason.players.length}</Pill>
-              <Pill>Soirées: {currentSeason.soirees.length}</Pill>
-              {tvMode && <Pill color="#38bdf8">MODE TV</Pill>}
-              {tvMode && <Pill>Écran: {tvLabels[tab] ?? tab}</Pill>}
+              <Pill>Joueurs: {state.season.players.length}</Pill>
+              <Pill>Soirées: {state.season.soirees.length}</Pill>
             </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <Button variant={tvMode ? "primary" : "ghost"} onClick={() => setTvMode((v) => !v)}>
-              {tvMode ? "Quitter Mode TV" : "Mode TV"}
+            <Button variant="ghost" onClick={() => startNewSoiree()}>
+              Générer une soirée
             </Button>
-            <Button variant={tab === "FUN" ? "primary" : "ghost"} onClick={() => setTab(tab === "FUN" ? "SOIREE" : "FUN")}>
-              {tab === "FUN" ? "Retour Saison" : "Mode Fun"}
+            <Button variant="danger" onClick={() => resetAll()}>
+              Reset complet
             </Button>
-            {!tvMode && (
-              <Button variant="ghost" onClick={() => startNewSoiree()}>
-                Générer une soirée
-              </Button>
-            )}
-            {!tvMode && (
-              <Button variant="danger" onClick={() => resetAll()}>
-                Reset complet
-              </Button>
-            )}
           </div>
         </div>
 
-        {tvMode && tab !== "CLASSEMENT" && (
-          <div className="mb-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
-            {seasonStats.table.slice(0, 3).map((r, idx) => {
-              const label = idx === 0 ? "Champion" : idx === 1 ? "Challenger" : "Contender";
-              const medal = idx === 0 ? "🥇" : idx === 1 ? "🥈" : "🥉";
-              return (
-                <div
-                  key={r.name}
-                  className={`relative rounded-2xl border border-white/10 bg-black/40 p-5 shadow-[0_30px_80px_rgba(0,0,0,0.35)] ${
-                    idx === 0 ? "ring-2 ring-emerald-400/40 tv-spotlight" : ""
-                  }`}
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs uppercase tracking-[0.3em] text-white/50">{label}</div>
-                    <div className="text-2xl">{medal}</div>
-                  </div>
-                  <div className="mt-4 flex items-center gap-3">
-                    <span className="h-3 w-3 rounded-full" style={{ background: playerColors.get(r.name) ?? "#ffffff33" }} />
-                    <div className="text-xl font-extrabold">{r.name}</div>
-                  </div>
-                  <div className="mt-3 flex items-center gap-3 text-sm text-white/70">
-                    <span className="font-semibold text-white">{r.pts} pts</span>
-                    <span>• {r.wins} V</span>
-                    <span>• {r.bonus} B</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="md:col-span-2 rounded-2xl border border-white/10 bg-black/30 p-5">
-            <div className="text-xs text-white/60">Jackpot actuel</div>
-            <div className="mt-2 text-4xl font-extrabold">{formatEUR(jackpotEUR)}</div>
-            <div className="mt-2 text-xs text-white/60">
-              +{formatEUR(MONEY.jackpotPerPlayerEUR)} / joueur / soirée • +{formatEUR(MONEY.rebuyEUR)} / re-buy
-            </div>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-black/30 p-5">
-            <div className="text-xs text-white/60">Saison active</div>
-            <div className="mt-2 text-lg font-semibold">{currentSeason.name}</div>
-            <div className="mt-2 text-xs text-white/60">
-              {currentSeason.players.length} joueurs • {currentSeason.soirees.length} soirées
-            </div>
-          </div>
-        </div>
-
-        <div className="mb-6 hidden md:flex gap-2 overflow-x-auto pb-2 tv-hide">
+        <div className="mb-6 hidden md:flex gap-2 overflow-x-auto pb-2">
           {(
             [
               ["SOIREE", "Soirée"],
               ["CLASSEMENT", "Classement"],
               ["HISTO", "Historique"],
               ["REBUY", "Re-buy"],
+              ["FUN", "Mode Fun"],
               ["H2H", "Confrontations"],
-              ["SAISONS", "Saisons"],
-              ["FINANCES", "Finances"],
+              ["ARBITRAGE", "Arbitrage"],
               ["PARAMS", "Paramètres"],
             ] as const
           ).map(([k, label]) => (
@@ -1953,7 +1768,7 @@ export default function App() {
           ))}
         </div>
 
-        <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0b0f17]/95 backdrop-blur tv-hide">
+        <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 border-t border-white/10 bg-[#0b0f17]/95 backdrop-blur">
           <div className="mx-auto flex max-w-6xl items-center justify-between px-3 py-2">
             {(
               [
@@ -1961,9 +1776,9 @@ export default function App() {
                 ["CLASSEMENT", "Classement"],
                 ["HISTO", "Historique"],
                 ["REBUY", "Re-buy"],
+                ["FUN", "Fun"],
                 ["H2H", "H2H"],
-                ["SAISONS", "Saisons"],
-                ["FINANCES", "Finances"],
+                ["ARBITRAGE", "Arbitre"],
                 ["PARAMS", "Params"],
               ] as const
             ).map(([k, label]) => (
@@ -1980,8 +1795,8 @@ export default function App() {
           </div>
         </div>
 
-        {tab !== "PARAMS" && tab !== "SAISONS" && tab !== "FUN" && (
-          <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center sm:justify-between tv-hide">
+        {tab !== "PARAMS" && tab !== "FUN" && (
+          <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="text-sm text-white/70">Soirée sélectionnée</div>
             <div className="w-full sm:w-56">
               <Select
@@ -1994,7 +1809,6 @@ export default function App() {
           </div>
         )}
 
-        <div className={`tv-stage ${tvMode ? "tv-animate" : ""}`} key={tvMode ? tab : "static"}>
         {tab === "SOIREE" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-2">
@@ -2011,32 +1825,24 @@ export default function App() {
                     <Button variant="ghost" onClick={() => setCompactMode((v) => !v)}>
                       {compactMode ? "Mode détaillé" : "Mode compact"}
                     </Button>
-                    <Button variant="ghost" onClick={() => setCardsMode((v) => !v)}>
-                      {cardsMode ? "Vue tableau" : "Vue cartes"}
-                    </Button>
                   </div>
                 }
               >
-                <div className={`space-y-3 ${cardsMode ? "block" : "md:hidden"}`}>
+                <div className="md:hidden space-y-3">
                   {currentSoiree.matches
                     .slice()
-                    .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
-                    .map((m: CoreMatch) => {
+                    .sort((a, b) => a.order - b.order)
+                    .map((m) => {
+                      const options = [m.a, m.b].map(normName).filter(Boolean);
                       const winner = normName(m.winner);
-                      const bonusA = m.checkoutBy === "A" ? 1 : 0;
-                      const bonusB = m.checkoutBy === "B" ? 1 : 0;
-                      const basePts = m.phase === "PFINAL" ? 1 : 2;
-                      const ptsA = (winner && winner === m.a ? basePts : 0) + bonusA;
-                      const ptsB = (winner && winner === m.b ? basePts : 0) + bonusB;
-                      const pickWinner = (name: string) => {
-                        setMatchWinner(m.id, name);
-                        if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
-                      };
-                      const cardClass = winner ? "winner-anim" : "";
+                      const bonus = m.checkout100 ? effectiveRules.checkoutBonusPoints : 0;
+                      const basePts = m.phase === "PFINAL" ? effectiveRules.smallFinalPoints : effectiveRules.winPoints;
+                      const ptsA = winner && winner === m.a ? basePts + bonus : 0;
+                      const ptsB = winner && winner === m.b ? basePts + bonus : 0;
 
                       if (compactMode) {
                         return (
-                          <div key={m.id} className={`rounded-2xl border border-white/10 bg-black/30 p-3 ${cardClass}`}>
+                          <div key={m.id} className="rounded-2xl border border-white/10 bg-black/30 p-3">
                             <div className="flex items-center justify-between text-xs text-white/60">
                               <div>#{m.order}</div>
                               <div className="flex items-center gap-2">
@@ -2056,33 +1862,16 @@ export default function App() {
                               </div>
                             </div>
                             <div className="mt-2 grid grid-cols-1 gap-2">
-                              <div className="grid grid-cols-2 gap-2">
-                                <Button variant={winner === m.a ? "primary" : "ghost"} onClick={() => pickWinner(m.a)} disabled={!m.a || !m.b} >
-                                  {m.a || "A"}
-                                </Button>
-                                <Button variant={winner === m.b ? "primary" : "ghost"} onClick={() => pickWinner(m.b)} disabled={!m.a || !m.b}>
-                                  {m.b || "B"}
-                                </Button>
-                              </div>
-                              <div className="flex items-center justify-between text-xs text-white/60">
-                                <span>{m.format} • {m.bo} • {m.maxTurns}t</span>
-                                <button
-                                  className="text-white/70 underline"
-                                  onClick={() => swapMatchPlayers(m.id)}
-                                  disabled={!m.a && !m.b}
-                                >
-                                  Inverser A/B
-                                </button>
-                              </div>
-                              <div className="grid grid-cols-1 gap-2">
-                                <Select
-                                  value={m.checkoutBy}
-                                  onChange={(v) => setMatchCheckoutBy(m.id, (v as "" | "A" | "B"))}
-                                  options={["A", "B"]}
-                                  placeholder="Checkout ≥100 par…"
-                                  disabled={!m.a || !m.b}
-                                />
-                              </div>
+                              <Select
+                                value={winner}
+                                onChange={(v) => {
+                                  setMatchWinner(m.id, v);
+                                  if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
+                                }}
+                                options={options}
+                                placeholder="Vainqueur…"
+                                disabled={!m.a || !m.b}
+                              />
                             </div>
                             <div className="mt-2 flex items-center justify-between text-xs text-white/60">
                               <div>Pts</div>
@@ -2097,7 +1886,7 @@ export default function App() {
                       }
 
                       return (
-                        <div key={m.id} className={`rounded-2xl border border-white/10 bg-black/30 p-3 ${cardClass}`}>
+                        <div key={m.id} className="rounded-2xl border border-white/10 bg-black/30 p-3">
                           <div className="flex items-center justify-between text-xs text-white/60">
                             <div>Match #{m.order}</div>
                             <div className="flex items-center gap-2">
@@ -2120,28 +1909,26 @@ export default function App() {
                             {m.format} • {m.bo} • {m.maxTurns}t
                           </div>
                           <div className="mt-3 grid grid-cols-1 gap-2">
-                            <div className="grid grid-cols-2 gap-2">
-                              <Button variant={winner === m.a ? "primary" : "ghost"} onClick={() => pickWinner(m.a)} disabled={!m.a || !m.b}>
-                                {m.a || "A"}
-                              </Button>
-                              <Button variant={winner === m.b ? "primary" : "ghost"} onClick={() => pickWinner(m.b)} disabled={!m.a || !m.b}>
-                                {m.b || "B"}
-                              </Button>
-                            </div>
-                            <button
-                              className="text-xs text-white/70 underline"
-                              onClick={() => swapMatchPlayers(m.id)}
-                              disabled={!m.a && !m.b}
-                            >
-                              Inverser A/B
-                            </button>
                             <Select
-                              value={m.checkoutBy}
-                              onChange={(v) => setMatchCheckoutBy(m.id, (v as "" | "A" | "B"))}
-                              options={["A", "B"]}
-                              placeholder="Checkout ≥100 par…"
+                              value={winner}
+                              onChange={(v) => {
+                                setMatchWinner(m.id, v);
+                                if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
+                              }}
+                              options={options}
+                              placeholder="Vainqueur…"
                               disabled={!m.a || !m.b}
                             />
+                            <label className="inline-flex items-center gap-2 text-xs text-white/80">
+                              <input
+                                type="checkbox"
+                                className="h-4 w-4 rounded border-white/20 bg-black"
+                                checked={!!m.checkout100}
+                                disabled={!normName(m.winner)}
+                                onChange={(e) => setMatchCheckout100(m.id, e.target.checked)}
+                              />
+                              Checkout ≥100
+                            </label>
                           </div>
                           <div className="mt-3 flex items-center justify-between text-xs">
                             <div className="text-white/60">Points</div>
@@ -2156,7 +1943,7 @@ export default function App() {
                     })}
                 </div>
 
-                <div className={`${cardsMode ? "hidden" : "hidden md:block"} overflow-x-auto`}>
+                <div className="hidden md:block overflow-x-auto">
                   <table className="w-full min-w-[900px] text-left text-sm">
                     <thead>
                       <tr className="text-white/70">
@@ -2167,7 +1954,7 @@ export default function App() {
                         <th className="py-2 pr-2">A</th>
                         <th className="py-2 pr-2">B</th>
                         <th className="py-2 pr-2">Vainqueur</th>
-                        <th className="py-2 pr-2">Checkout ≥100 par</th>
+                        <th className="py-2 pr-2">Checkout ≥100</th>
                         <th className="py-2 pr-2">Points A</th>
                         <th className="py-2 pr-2">Points B</th>
                       </tr>
@@ -2175,18 +1962,17 @@ export default function App() {
                     <tbody>
                       {currentSoiree.matches
                         .slice()
-                        .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
-                        .map((m: CoreMatch) => {
+                        .sort((a, b) => a.order - b.order)
+                        .map((m) => {
+                          const options = [m.a, m.b].map(normName).filter(Boolean);
                           const winner = normName(m.winner);
-                          const bonusA = m.checkoutBy === "A" ? 1 : 0;
-                          const bonusB = m.checkoutBy === "B" ? 1 : 0;
-                          const basePts = m.phase === "PFINAL" ? 1 : 2;
-                          const ptsA = (winner && winner === m.a ? basePts : 0) + bonusA;
-                          const ptsB = (winner && winner === m.b ? basePts : 0) + bonusB;
-                          const rowClass = winner ? "winner-row" : "";
+                          const bonus = m.checkout100 ? effectiveRules.checkoutBonusPoints : 0;
+                          const basePts = m.phase === "PFINAL" ? effectiveRules.smallFinalPoints : effectiveRules.winPoints;
+                          const ptsA = winner && winner === m.a ? basePts + bonus : 0;
+                          const ptsB = winner && winner === m.b ? basePts + bonus : 0;
 
                           return (
-                            <tr key={m.id} className={`border-t border-white/10 ${rowClass}`}>
+                            <tr key={m.id} className="border-t border-white/10">
                               <td className="py-2 pr-2 text-white/70">{m.order}</td>
                               <td className="py-2 pr-2">
                                 <Pill>{m.phase}</Pill>
@@ -2214,19 +2000,22 @@ export default function App() {
                                     setMatchWinner(m.id, v);
                                     if (m.phase === "DEMI") setTimeout(() => recalcFinalAndPFinal(), 0);
                                   }}
-                                  options={[m.a, m.b].map(normName).filter(Boolean)}
+                                  options={options}
                                   placeholder="Vainqueur…"
                                   disabled={!m.a || !m.b}
                                 />
                               </td>
                               <td className="py-2 pr-2">
-                                <Select
-                                  value={m.checkoutBy}
-                                  onChange={(v) => setMatchCheckoutBy(m.id, (v as "" | "A" | "B"))}
-                                  options={["A", "B"]}
-                                  placeholder="Checkout ≥100 par…"
-                                  disabled={!m.a || !m.b}
-                                />
+                                <label className="inline-flex items-center gap-2 text-sm text-white/80">
+                                  <input
+                                    type="checkbox"
+                                    className="h-4 w-4 rounded border-white/20 bg-black"
+                                    checked={!!m.checkout100}
+                                    disabled={!normName(m.winner)}
+                                    onChange={(e) => setMatchCheckout100(m.id, e.target.checked)}
+                                  />
+                                  Oui
+                                </label>
                               </td>
                               <td className="py-2 pr-2 font-semibold">{ptsA}</td>
                               <td className="py-2 pr-2 font-semibold">{ptsB}</td>
@@ -2260,7 +2049,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {currentPoolStandings[pool].map((r: { name: string; pts: number; wins: number; bonus: number }, idx: number) => (
+                          {currentPoolStandings[pool].map((r, idx) => (
                             <tr key={r.name} className="border-t border-white/10">
                               <td className="py-1">{idx + 1}</td>
                               <td className="py-1 font-semibold">{r.name}</td>
@@ -2283,7 +2072,7 @@ export default function App() {
                         <Pill>Pts ➜ V ➜ Bonus</Pill>
                       </div>
                       <div className="mt-2 space-y-1">
-                        {currentPoolStandings[pool].map((r: { name: string; pts: number; wins: number; bonus: number }, idx: number) => (
+                        {currentPoolStandings[pool].map((r, idx) => (
                           <div key={r.name} className="flex items-center justify-between rounded-lg bg-black/20 px-2 py-1">
                             <div className="flex items-center gap-2">
                               <span className="text-white/60 w-5">{idx + 1}.</span>
@@ -2388,7 +2177,7 @@ export default function App() {
                   <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3">
                     <div className="text-xs text-white/60">Gains cumulés (saison)</div>
                     <div className="mt-2 space-y-1">
-                      {totalGainsEUR.slice(0, 6).map((x: { player: string; eur: number }) => (
+                      {totalGainsEUR.slice(0, 6).map((x) => (
                         <div key={x.player} className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(x.player) ?? "#ffffff33" }} />
@@ -2442,7 +2231,7 @@ export default function App() {
                   <div className="text-xs text-white/60">Jackpot actuel</div>
                   <div className="mt-1 text-2xl font-extrabold">{formatEUR(jackpotEUR)}</div>
                   <div className="mt-2 text-xs text-white/60">
-                    +{formatEUR(MONEY.jackpotPerPlayerEUR)} / joueur / soirée • +{formatEUR(MONEY.rebuyEUR)} / re-buy
+                    +{formatEUR(effectiveRules.jackpotPerPlayerEUR)} / joueur / soirée • +{formatEUR(effectiveRules.rebuyEUR)} / re-buy
                   </div>
                 </div>
 
@@ -2464,7 +2253,7 @@ export default function App() {
                 <div className="rounded-xl border border-white/10 bg-black/30 p-3">
                   <div className="text-xs text-white/60">Gains cumulés (top 5)</div>
                   <div className="mt-2 space-y-1">
-                    {totalGainsEUR.slice(0, 5).map((x: { player: string; eur: number }) => (
+                    {totalGainsEUR.slice(0, 5).map((x) => (
                       <div key={x.player} className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                           <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(x.player) ?? "#ffffff33" }} />
@@ -2478,41 +2267,12 @@ export default function App() {
               </div>
             </Section>
 
-            <Section
-              title="Timeline animée — Évolution du classement"
-              right={
-                <div className="flex flex-wrap items-center gap-2">
-                  <Button variant="ghost" onClick={() => setTimelinePlay((v) => !v)}>
-                    {timelinePlay ? "Pause" : "Lecture"}
-                  </Button>
-                  <Button variant="ghost" onClick={() => setTimelineStep(0)} disabled={rankingTimeline.labels.length === 0}>
-                    Début
-                  </Button>
-                </div>
-              }
-            >
-              <div className="text-xs text-white/60 mb-2">Un seul graphique, toutes les soirées et tous les joueurs.</div>
+            <Section title="Évolution du classement (global)">
+              <div className="text-xs text-white/60 mb-2">Une seule courbe par joueur, rang 1 en haut.</div>
               {rankingTimeline.labels.length === 0 ? (
                 <div className="text-sm text-white/70">Pas encore de soirées.</div>
               ) : (
                 <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                  <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="text-xs text-white/60">
-                      Soirée affichée : <span className="font-semibold text-white">S{rankingTimeline.labels[timelineStep] ?? rankingTimeline.labels[0]}</span>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-white/70">
-                      <span>Vitesse</span>
-                      <select
-                        className="rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-xs text-white"
-                        value={timelineSpeedMs}
-                        onChange={(e) => setTimelineSpeedMs(Number(e.target.value))}
-                      >
-                        <option value={2000}>Lente</option>
-                        <option value={1200}>Normale</option>
-                        <option value={700}>Rapide</option>
-                      </select>
-                    </div>
-                  </div>
                   <div className="w-full overflow-x-auto">
                     <div className="min-w-[640px]">
                       <svg viewBox="0 0 700 260" className="w-full h-[260px]">
@@ -2523,8 +2283,8 @@ export default function App() {
                           const padR = 20;
                           const padT = 20;
                           const padB = 30;
-                          const playersCount = Math.max(currentSeason.players.length, 1);
-                          const pointsCount = Math.max(timelineStep + 1, 1);
+                          const playersCount = Math.max(state.season.players.length, 1);
+                          const pointsCount = Math.max(rankingTimeline.labels.length, 1);
                           const xScale = (i: number) => {
                             if (pointsCount === 1) return (w - padL - padR) / 2 + padL;
                             return padL + (i / (pointsCount - 1)) * (w - padL - padR);
@@ -2548,7 +2308,7 @@ export default function App() {
                                 );
                               })}
 
-                              {rankingTimeline.labels.slice(0, timelineStep + 1).map((label: number, i: number) => {
+                              {rankingTimeline.labels.map((label, i) => {
                                 const x = xScale(i);
                                 return (
                                   <text key={`x-${label}`} x={x} y={h - 8} fontSize="10" fill="#ffffff80" textAnchor="middle">
@@ -2557,10 +2317,9 @@ export default function App() {
                                 );
                               })}
 
-                              {rankingTimeline.series.map((ser: { player: string; ranks: number[] }) => {
-                                const sliced = ser.ranks.slice(0, timelineStep + 1);
-                                if (sliced.length === 0) return null;
-                                const d = sliced
+                              {rankingTimeline.series.map((ser) => {
+                                if (ser.ranks.length === 0) return null;
+                                const d = ser.ranks
                                   .map((rank, i) => `${i === 0 ? "M" : "L"} ${xScale(i)} ${yScale(rank)}`)
                                   .join(" ");
                                 return (
@@ -2580,19 +2339,8 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="mt-3">
-                    <input
-                      type="range"
-                      min={0}
-                      max={Math.max(0, rankingTimeline.labels.length - 1)}
-                      value={timelineStep}
-                      onChange={(e) => setTimelineStep(Number(e.target.value))}
-                      className="w-full"
-                    />
-                  </div>
-
                   <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                    {rankingTimeline.series.map((ser: { player: string }) => (
+                    {rankingTimeline.series.map((ser) => (
                       <div key={ser.player} className="inline-flex items-center gap-2 rounded-full bg-black/40 px-2 py-1">
                         <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(ser.player) ?? "#ffffff33" }} />
                         <span className="font-semibold">{ser.player}</span>
@@ -2605,90 +2353,17 @@ export default function App() {
           </div>
         )}
 
-        {tab === "CLASSEMENT" && (
-          <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <Section title="Win rate (taux de victoire)">
-              <div className="space-y-2">
-                {advancedStats.winRates
-                  .slice()
-                  .sort((a, b) => b.rate - a.rate || b.wins - a.wins || a.player.localeCompare(b.player))
-                  .map((r) => (
-                    <div key={r.player} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.player) ?? "#ffffff33" }} />
-                          <span className="font-semibold">{r.player}</span>
-                        </div>
-                        <span className="font-bold">{r.rate}%</span>
-                      </div>
-                      <div className="mt-2 h-2 w-full rounded-full bg-white/10">
-                        <div
-                          className="h-2 rounded-full"
-                          style={{ width: `${r.rate}%`, background: playerColors.get(r.player) ?? "#22c55e" }}
-                        />
-                      </div>
-                      <div className="mt-1 text-xs text-white/60">
-                        {r.wins} V • {r.losses} D • {r.played} matchs
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </Section>
-
-            <Section title="Clutch (finales gagnées)">
-              <div className="space-y-2">
-                {advancedStats.clutch
-                  .slice()
-                  .sort((a, b) => b.rate - a.rate || b.finals - a.finals || a.player.localeCompare(b.player))
-                  .map((r) => (
-                    <div key={r.player} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.player) ?? "#ffffff33" }} />
-                          <span className="font-semibold">{r.player}</span>
-                        </div>
-                        <span className="font-bold">{r.rate}%</span>
-                      </div>
-                      <div className="mt-1 text-xs text-white/60">
-                        {r.wins} / {r.finals} finales gagnées
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </Section>
-
-            <Section title="Présence en demi-finales">
-              <div className="space-y-2">
-                {advancedStats.semiRuns
-                  .slice()
-                  .sort((a, b) => b.semis - a.semis || a.player.localeCompare(b.player))
-                  .map((r) => (
-                    <div key={r.player} className="flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: playerColors.get(r.player) ?? "#ffffff33" }} />
-                        <span className="font-semibold">{r.player}</span>
-                      </div>
-                      <span className="font-bold">{r.semis}</span>
-                    </div>
-                  ))}
-              </div>
-            </Section>
-          </div>
-        )}
-
         {tab === "HISTO" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Section title="Historique des soirées">
               <div className="space-y-2">
-                {currentSeason.soirees
+                {state.season.soirees
                   .slice()
-                  .sort((a: Soiree, b: Soiree) => b.number - a.number)
-                  .map((s: Soiree) => {
-                    const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
-                    const rows = currentSeason.players.map((p: string) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
-                    rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
-                      b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
-                    );
+                  .sort((a, b) => b.number - a.number)
+                  .map((s) => {
+                    const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, state.season, effectiveRules);
+                    const rows = state.season.players.map((p) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
+                    rows.sort((a, b) => b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name));
                     const podium = rows.slice(0, 3);
                     return (
                       <button
@@ -2705,8 +2380,8 @@ export default function App() {
                         </div>
                         <div className="mt-2 text-sm text-white/70">
                           Podium: {(() => {
-                        const final = s.matches.find((m: CoreMatch) => m.phase === "FINAL");
-                        const pfinal = s.matches.find((m: CoreMatch) => m.phase === "PFINAL");
+                            const final = s.matches.find((m) => m.phase === "FINAL");
+                            const pfinal = s.matches.find((m) => m.phase === "PFINAL");
                             const wFinal = normName(final?.winner ?? "");
                             const aFinal = normName(final?.a ?? "");
                             const bFinal = normName(final?.b ?? "");
@@ -2714,13 +2389,13 @@ export default function App() {
                             const third = normName(pfinal?.winner ?? "");
                             const ok = wFinal && second && third;
                             if (ok) return `1) ${wFinal} • 2) ${second} • 3) ${third}`;
-                        return podium.map((p: { name: string; pts: number }, i: number) => `${i + 1}) ${p.name} (${p.pts})`).join(" • ");
-                      })()}
+                            return podium.map((p, i) => `${i + 1}) ${p.name} (${p.pts})`).join(" • ");
+                          })()}
                         </div>
                         <div className="mt-2 flex flex-wrap gap-2">
                           <Pill>
                             Jackpot +
-                            {formatEUR((s.pools.A.length + s.pools.B.length) * MONEY.jackpotPerPlayerEUR + s.rebuys.length * MONEY.rebuyEUR)}
+                            {formatEUR((s.pools.A.length + s.pools.B.length) * effectiveRules.jackpotPerPlayerEUR + s.rebuys.length * effectiveRules.rebuyEUR)}
                           </Pill>
                           <Pill>Matchs: {s.matches.length}</Pill>
                         </div>
@@ -2745,8 +2420,8 @@ export default function App() {
                   <tbody>
                     {currentSoiree.matches
                       .slice()
-                      .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
-                      .map((m: CoreMatch) => (
+                      .sort((a, b) => a.order - b.order)
+                      .map((m) => (
                         <tr key={m.id} className="border-t border-white/10">
                           <td className="py-2 pr-2 text-white/70">{m.order}</td>
                           <td className="py-2 pr-2">
@@ -2785,8 +2460,8 @@ export default function App() {
                   <div className="text-sm text-white/70">Aucun re-buy pour cette soirée.</div>
                 ) : (
                   <div className="space-y-3">
-                    {currentSoiree.rebuys.map((r: RebuyMatch, idx: number) => {
-                      const players = currentSeason.players;
+                    {currentSoiree.rebuys.map((r, idx) => {
+                      const players = state.season.players;
                       const buyer = normName(r.buyer);
                       const a = normName(r.a);
                       const b = normName(r.b);
@@ -2798,11 +2473,13 @@ export default function App() {
                         if (!buyerN || !winnerN) return "";
 
                         if (currentSoiree.number <= 2) {
-                          return winnerN === buyerN ? "✅ Le buyer gagne +2 pts" : "❌ Buyer perd → 0 pt pour tous";
+                          return winnerN === buyerN
+                            ? `✅ Le buyer gagne +${effectiveRules.rebuyWinPointsS1S2} pts`
+                            : "❌ Buyer perd → 0 pt pour tous";
                         }
 
                         let doneBefore = 0;
-                        for (const sx of currentSeason.soirees) {
+                        for (const sx of state.season.soirees) {
                           if (sx.number >= currentSoiree.number) continue;
                           for (const rb of sx.rebuys) {
                             if (normName(rb.buyer) === buyerN && normName(rb.winner)) doneBefore++;
@@ -2810,9 +2487,12 @@ export default function App() {
                         }
                         doneBefore += currentSoiree.rebuys
                           .slice(0, idx)
-                          .filter((x: RebuyMatch) => normName(x.buyer) === buyerN && normName(x.winner)).length;
+                          .filter((x) => normName(x.buyer) === buyerN && normName(x.winner)).length;
 
-                        const winPts = doneBefore === 0 ? 2 : 1;
+                        const winPts =
+                          doneBefore === 0
+                            ? effectiveRules.rebuyFirstWinPointsS3Plus
+                            : effectiveRules.rebuyNextWinPointsS3Plus;
                         return winnerN === buyerN
                           ? `✅ Le buyer gagne +${winPts} pt${winPts > 1 ? "s" : ""}`
                           : "❌ Buyer perd → 0 pt pour tous";
@@ -2885,7 +2565,7 @@ export default function App() {
                           </div>
 
                           {info && <div className="mt-3 text-sm text-white/70">{info}</div>}
-                          <div className="mt-2 text-xs text-white/60">Impact cagnotte : +{formatEUR(MONEY.rebuyEUR)} (automatique)</div>
+                          <div className="mt-2 text-xs text-white/60">Impact cagnotte : +{formatEUR(effectiveRules.rebuyEUR)} (automatique)</div>
                         </div>
                       );
                     })}
@@ -2899,10 +2579,10 @@ export default function App() {
                 <div className="text-sm text-white/70 space-y-2">
                   <div>• Match sec : 301 • 10 tours max</div>
                   <div>• Seul le buyer peut marquer des points :</div>
-                  <div className="ml-3">— Soirées 1 & 2 : s’il gagne : +2 pts (ancien système)</div>
+                  <div className="ml-3">— Soirées 1 & 2 : s’il gagne : +{effectiveRules.rebuyWinPointsS1S2} pts</div>
                   <div className="ml-3">— À partir de la soirée 3 :</div>
-                  <div className="ml-6">• 1er re-buy de la saison gagné : +2 pts</div>
-                  <div className="ml-6">• re-buys suivants gagnés : +1 pt</div>
+                  <div className="ml-6">• 1er re-buy de la saison gagné : +{effectiveRules.rebuyFirstWinPointsS3Plus} pts</div>
+                  <div className="ml-6">• re-buys suivants gagnés : +{effectiveRules.rebuyNextWinPointsS3Plus} pt</div>
                   <div className="ml-3">— s’il perd : 0 pt pour tous</div>
                   <div className="mt-2 text-xs text-white/60">⚠️ Le re-buy ne qualifie jamais pour les phases finales.</div>
                 </div>
@@ -2911,10 +2591,10 @@ export default function App() {
               <Section title="Jackpot (détail)">
                 <div className="text-sm text-white/70 space-y-1">
                   <div>
-                    Soirées jouées : <span className="font-semibold text-white">{currentSeason.soirees.length}</span>
+                    Soirées jouées : <span className="font-semibold text-white">{state.season.soirees.length}</span>
                   </div>
                   <div>
-                    Rebuys total : <span className="font-semibold text-white">{currentSeason.soirees.reduce((s: number, x: Soiree) => s + x.rebuys.length, 0)}</span>
+                    Rebuys total : <span className="font-semibold text-white">{state.season.soirees.reduce((s, x) => s + x.rebuys.length, 0)}</span>
                   </div>
                   <div className="mt-2">
                     Jackpot actuel : <span className="font-extrabold text-white">{formatEUR(jackpotEUR)}</span>
@@ -2929,134 +2609,20 @@ export default function App() {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-2 space-y-4">
               <Section
-                title="Mode Live Operateur"
-                right={
-                  <div className="flex flex-wrap gap-2">
-                    <Button variant={funLiveEnabled ? "primary" : "ghost"} onClick={() => setFunLiveEnabled((v) => !v)}>
-                      {funLiveEnabled ? "Quitter Live" : "Entrer Live"}
-                    </Button>
-                    <Button variant="ghost" onClick={() => goToNextPendingLiveMatch()} disabled={!funLiveMatches.length}>
-                      Prochain non joue
-                    </Button>
-                  </div>
-                }
-              >
-                {!funLiveEnabled ? (
-                  <div className="text-sm text-white/70">
-                    Active ce mode pour piloter les matchs en direct (mobile first) avec validation rapide.
-                  </div>
-                ) : !currentLiveMatch ? (
-                  <div className="text-sm text-white/70">Aucun match disponible.</div>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="rounded-xl border border-white/10 bg-black/30 p-4">
-                      <div className="flex items-center justify-between text-xs text-white/60">
-                        <span>
-                          Match {funLiveIndex + 1} / {funLiveMatches.length}
-                        </span>
-                        <Pill>{currentLiveMatch.phase}</Pill>
-                      </div>
-                      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                        <button
-                          className={`rounded-xl border px-3 py-3 text-left ${
-                            normName(currentLiveMatch.winner) === currentLiveMatch.a
-                              ? "border-emerald-400 bg-emerald-500/15"
-                              : "border-white/10 bg-black/20 hover:bg-black/35"
-                          }`}
-                          onClick={() => setLiveWinner(currentLiveMatch.id, currentLiveMatch._src, currentLiveMatch.a)}
-                          disabled={!currentLiveMatch.a}
-                        >
-                          <div className="text-xs text-white/60">Vainqueur A</div>
-                          <div className="font-semibold">{currentLiveMatch.a || "-"}</div>
-                        </button>
-                        <button
-                          className={`rounded-xl border px-3 py-3 text-left ${
-                            normName(currentLiveMatch.winner) === currentLiveMatch.b
-                              ? "border-emerald-400 bg-emerald-500/15"
-                              : "border-white/10 bg-black/20 hover:bg-black/35"
-                          }`}
-                          onClick={() => setLiveWinner(currentLiveMatch.id, currentLiveMatch._src, currentLiveMatch.b)}
-                          disabled={!currentLiveMatch.b}
-                        >
-                          <div className="text-xs text-white/60">Vainqueur B</div>
-                          <div className="font-semibold">{currentLiveMatch.b || "-"}</div>
-                        </button>
-                      </div>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <Button variant="ghost" onClick={() => setLiveWinner(currentLiveMatch.id, currentLiveMatch._src, "")}>
-                          Effacer resultat
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button variant="ghost" onClick={() => setFunLiveIndex((i) => Math.max(0, i - 1))} disabled={funLiveIndex <= 0}>
-                        Match precedent
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        onClick={() => setFunLiveIndex((i) => Math.min(funLiveMatches.length - 1, i + 1))}
-                        disabled={funLiveIndex >= funLiveMatches.length - 1}
-                      >
-                        Match suivant
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </Section>
-
-              <Section
-                title="Mode Fun — Tournoi Soiree Unique"
+                title="Mode Fun — Soirée unique"
                 right={
                   <div className="flex flex-wrap gap-2">
                     <Button variant="ghost" onClick={() => generateFunSoiree()} disabled={state.funMode.players.length < 2}>
-                      Generer ligue
-                    </Button>
-                    <Button variant="ghost" onClick={() => generateFunFinals()} disabled={funStandings.length < 4}>
-                      Generer top 4
+                      Générer les matchs
                     </Button>
                     <Button variant="danger" onClick={() => resetFunMode()}>
-                      Reinitialiser
+                      Réinitialiser
                     </Button>
                   </div>
                 }
               >
-                <div className="mb-3 rounded-xl border border-white/10 bg-black/30 p-3 space-y-3">
-                  <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
-                    <div>
-                      <div className="text-xs text-white/60 mb-1">Format</div>
-                      <Select
-                        value={String(state.funMode.format)}
-                        onChange={(v) => setFunFormat(Number(v) === 501 ? 501 : 301)}
-                        options={["301", "501"]}
-                      />
-                    </div>
-                    <div>
-                      <div className="text-xs text-white/60 mb-1">Mode argent</div>
-                      <label className="inline-flex items-center gap-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={state.funMode.moneyEnabled}
-                          onChange={(e) => updateFunMode((fun) => ({ ...fun, moneyEnabled: e.target.checked }))}
-                        />
-                        Activer
-                      </label>
-                    </div>
-                    <div>
-                      <div className="text-xs text-white/60 mb-1">Mise par joueur</div>
-                      <input
-                        type="number"
-                        min={0}
-                        step={0.5}
-                        value={state.funMode.moneyPerPlayer}
-                        onChange={(e) =>
-                          updateFunMode((fun) => ({ ...fun, moneyPerPlayer: Math.max(0, Number(e.target.value) || 0) }))
-                        }
-                        className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
-                        disabled={!state.funMode.moneyEnabled}
-                      />
-                    </div>
-                  </div>
-                  <div className="text-xs text-white/60 mb-2">Joueurs (2 a 8)</div>
+                <div className="mb-3 rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60 mb-2">Joueurs (2 à 8)</div>
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <input
                       value={funPlayerInput}
@@ -3078,22 +2644,16 @@ export default function App() {
                       >
                         <span className="h-2.5 w-2.5 rounded-full" style={{ background: getPlayerColor(p) }} />
                         <span>{p}</span>
-                        <span className="text-white/60">x</span>
+                        <span className="text-white/60">✕</span>
                       </button>
                     ))}
                   </div>
-                  {state.funMode.players.length % 2 === 1 && state.funMode.players.length >= 3 && (
-                    <div className="text-xs text-amber-300">
-                      Nombre impair detecte: un joueur sera en repos a chaque tour de ligue.
-                    </div>
-                  )}
                 </div>
 
                 {state.funMode.matches.length === 0 ? (
-                  <div className="text-sm text-white/70">Ajoute au moins 2 joueurs puis clique sur "Generer ligue".</div>
+                  <div className="text-sm text-white/70">Ajoute au moins 2 joueurs puis clique “Générer les matchs”.</div>
                 ) : (
                   <div className="space-y-2">
-                    <div className="text-xs text-white/60 mb-1">Ligue (round-robin)</div>
                     {state.funMode.matches
                       .slice()
                       .sort((a, b) => a.order - b.order)
@@ -3120,78 +2680,6 @@ export default function App() {
                   </div>
                 )}
               </Section>
-
-              <Section
-                title="Parties Simultanees (Classement Par Position)"
-                right={
-                  <Button variant="ghost" onClick={() => addFunPositionRound()} disabled={state.funMode.players.length < 2}>
-                    + Ajouter une manche
-                  </Button>
-                }
-              >
-                {state.funMode.positionRounds.length === 0 ? (
-                  <div className="text-sm text-white/70">Ajoute une manche pour saisir les positions (1er, 2e, etc.).</div>
-                ) : (
-                  <div className="space-y-3">
-                    {state.funMode.positionRounds.map((round, idx) => (
-                      <div key={round.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
-                        <div className="mb-2 flex items-center justify-between">
-                          <div className="font-semibold text-sm">Manche {idx + 1}</div>
-                          <Button variant="danger" onClick={() => deleteFunPositionRound(round.id)}>
-                            Supprimer
-                          </Button>
-                        </div>
-                        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
-                          {Array.from({ length: state.funMode.players.length }).map((_, posIdx) => (
-                            <div key={`${round.id}_${posIdx}`}>
-                              <div className="mb-1 text-xs text-white/60">Position {posIdx + 1}</div>
-                              <Select
-                                value={round.positions[posIdx] ?? ""}
-                                onChange={(v) => setFunRoundPosition(round.id, posIdx, v)}
-                                options={state.funMode.players}
-                                placeholder="Joueur..."
-                              />
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </Section>
-
-              <Section title="Top 4 — Demi / Petite Finale / Finale">
-                {state.funMode.finals.length === 0 ? (
-                  <div className="text-sm text-white/70">Genere le top 4 apres la ligue pour creer les finales.</div>
-                ) : (
-                  <div className="space-y-2">
-                    {state.funMode.finals
-                      .slice()
-                      .sort((a, b) => a.order - b.order)
-                      .map((m) => (
-                        <div key={m.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
-                          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                            <div className="text-sm">
-                              <Pill>{m.phase}</Pill>
-                              <span className="ml-2 font-semibold">{m.a || "?"}</span>
-                              <span className="mx-2 text-white/50">vs</span>
-                              <span className="font-semibold">{m.b || "?"}</span>
-                            </div>
-                            <div className="w-full md:w-56">
-                              <Select
-                                value={normName(m.winner)}
-                                onChange={(v) => setFunFinalWinner(m.id, v)}
-                                options={[m.a, m.b].filter(isNonEmptyString)}
-                                placeholder="Vainqueur..."
-                                disabled={!m.a || !m.b}
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                )}
-              </Section>
             </div>
 
             <div className="space-y-4">
@@ -3204,11 +2692,8 @@ export default function App() {
                         <span className="h-2.5 w-2.5 rounded-full" style={{ background: getPlayerColor(r.name) }} />
                         <span className="font-semibold">{r.name}</span>
                       </div>
-                      <div className="text-xs text-white/70 text-right">
-                        <div>
-                          <span className="font-bold text-white">{r.total}</span> pts
-                        </div>
-                        <div>{r.wins} V / {r.played} M / {r.posPts} pos</div>
+                      <div className="text-xs text-white/70">
+                        <span className="font-bold text-white">{r.wins}</span> V / {r.played} M
                       </div>
                     </div>
                   ))}
@@ -3216,129 +2701,12 @@ export default function App() {
                 </div>
               </Section>
 
-              <Section title="Podium Fun">
-                <div className="space-y-2 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="text-white/70">1er</span>
-                    <span className="font-semibold">{funPodium.first || "-"}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-white/70">2e</span>
-                    <span className="font-semibold">{funPodium.second || "-"}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-white/70">3e</span>
-                    <span className="font-semibold">{funPodium.third || "-"}</span>
-                  </div>
-                  {funPodium.provisional && <div className="text-xs text-white/60">Podium provisoire (avant resultat final complet).</div>}
-                </div>
-              </Section>
-
-              <Section title="Cagnotte Fun">
-                <div className="text-sm text-white/70 space-y-1">
-                  <div>Mode argent: <span className="font-semibold text-white">{state.funMode.moneyEnabled ? "Active" : "Desactive"}</span></div>
-                  <div>Mise par joueur: <span className="font-semibold text-white">{formatEUR(state.funMode.moneyPerPlayer)}</span></div>
-                  <div>Total: <span className="font-semibold text-white">{formatEUR(funPotEUR)}</span></div>
-                </div>
-              </Section>
-
-              <Section title="Regles Fun">
+              <Section title="Règles Fun">
                 <div className="text-sm text-white/70 space-y-2">
-                  <div>• Mode independant des saisons.</div>
+                  <div>• Mode indépendant de la saison.</div>
                   <div>• Maximum 8 joueurs.</div>
-                  <div>• Ligue round-robin + top 4 automatique.</div>
-                  <div>• Classement = (victoires x3) + points de position par manche.</div>
-                </div>
-              </Section>
-            </div>
-          </div>
-        )}
-
-        {tab === "FINANCES" && (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <div className="lg:col-span-2">
-              <Section title={`Finances — Soirée ${currentSoiree.number}`}>
-                <div className="mb-3 flex flex-wrap items-center gap-2">
-                  <Button variant="ghost" onClick={() => updateFinanceAll(true)}>
-                    Tout cocher
-                  </Button>
-                  <Button variant="ghost" onClick={() => updateFinanceAll(false)}>
-                    Tout décocher
-                  </Button>
-                </div>
-
-                <div className="overflow-x-auto">
-                  <table className="w-full min-w-[520px] text-left text-sm">
-                    <thead>
-                      <tr className="text-white/70">
-                        <th className="py-2 pr-2">Payé</th>
-                        <th className="py-2 pr-2">Joueur</th>
-                        <th className="py-2 pr-2">Montant</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {uniq([...currentSoiree.pools.A, ...currentSoiree.pools.B])
-                        .filter(isNonEmptyString)
-                        .map((p) => {
-                          const paid = Boolean(currentSoiree.payments?.[p]);
-                          return (
-                            <tr key={p} className="border-t border-white/10">
-                              <td className="py-2 pr-2">
-                                <input
-                                  type="checkbox"
-                                  className="h-4 w-4 rounded border-white/20 bg-black"
-                                  checked={paid}
-                                  onChange={(e) => updateFinancePayment(p, e.target.checked)}
-                                />
-                              </td>
-                              <td className="py-2 pr-2 font-semibold">{p}</td>
-                              <td className="py-2 pr-2">{formatEUR(MONEY.entryFeeEUR)}</td>
-                            </tr>
-                          );
-                        })}
-                    </tbody>
-                  </table>
-                </div>
-
-                <div className="mt-4 rounded-xl border border-white/10 bg-black/30 p-3">
-                  <div className="text-xs text-white/60">Notes (règlements, remarques)</div>
-                  <textarea
-                    className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 p-3 text-sm text-white outline-none focus:border-white/25"
-                    rows={4}
-                    placeholder="Ex: Marvin a payé en espèces, Angel paie la prochaine soirée…"
-                    value={currentSoiree.financeNotes ?? ""}
-                    onChange={(e) => updateFinanceNotes(e.target.value)}
-                  />
-                </div>
-              </Section>
-            </div>
-
-            <div className="space-y-4">
-              <Section title="Récap soirée">
-                {(() => {
-                  const players = uniq([...currentSoiree.pools.A, ...currentSoiree.pools.B]).filter(isNonEmptyString);
-                  const paidCount = players.filter((p) => Boolean(currentSoiree.payments?.[p])).length;
-                  const total = players.length * MONEY.entryFeeEUR;
-                  return (
-                    <div className="text-sm text-white/70 space-y-2">
-                      <div>
-                        Joueurs: <span className="font-semibold text-white">{players.length}</span>
-                      </div>
-                      <div>
-                        Payés: <span className="font-semibold text-white">{paidCount}</span> / {players.length}
-                      </div>
-                      <div>
-                        Total dû: <span className="font-semibold text-white">{formatEUR(total)}</span>
-                      </div>
-                    </div>
-                  );
-                })()}
-              </Section>
-
-              <Section title="Infos">
-                <div className="text-sm text-white/70 space-y-2">
-                  <div>• Suis les paiements par soirée.</div>
-                  <div>• Les notes sont privées (onglet finances).</div>
+                  <div>• Matchs en round-robin (tout le monde se rencontre).</div>
+                  <div>• 1 victoire = 1 point dans le classement Fun.</div>
                 </div>
               </Section>
             </div>
@@ -3410,174 +2778,231 @@ export default function App() {
           </Section>
         )}
 
-        {tab === "SAISONS" && (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Section title="Saisons">
-              <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-[1fr,auto]">
-                <input
-                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
-                  placeholder="Nom de la nouvelle saison…"
-                  value={newSeasonName}
-                  onChange={(e) => setNewSeasonName(e.target.value)}
-                />
-                <Button variant="primary" onClick={() => addSeason()}>
-                  Créer
-                </Button>
-              </div>
-              <label className="mb-3 inline-flex items-center gap-2 text-xs text-white/70">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 rounded border-white/20 bg-black"
-                  checked={copyPlayersForNewSeason}
-                  onChange={(e) => setCopyPlayersForNewSeason(e.target.checked)}
-                />
-                Copier les joueurs de la saison actuelle
-              </label>
-
-              <div className="space-y-2">
-                {state.seasons.map((s, idx) => (
-                  <div key={s.id} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        {tab === "ARBITRAGE" && (
+          <Section title={`Mode Arbitrage — Soirée ${currentSoiree.number}`} right={<Pill>Officiel</Pill>}>
+            <div className="space-y-3">
+              {currentSoiree.matches
+                .slice()
+                .sort((a, b) => a.order - b.order)
+                .map((m) => (
+                  <div key={m.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
-                        <span className="text-white/60 w-6">{idx + 1}.</span>
-                        <input
-                          className="w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-sm text-white outline-none focus:border-white/25"
-                          defaultValue={s.name}
-                          onBlur={(e) => renameSeason(s.id, e.target.value)}
-                        />
-                        {s.id === currentSeason.id && <Pill color="#22c55e">Active</Pill>}
+                        <Pill>{m.phase}</Pill>
+                        <span className="text-xs text-white/60">Match #{m.order}</span>
+                        <Pill
+                          color={
+                            m.status === "VALIDATED" ? "#22c55e" : m.status === "CONTESTED" ? "#ef4444" : "#eab308"
+                          }
+                        >
+                          {m.status}
+                        </Pill>
                       </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Pill>Joueurs: {s.players.length}</Pill>
-                        <Pill>Soirées: {s.soirees.length}</Pill>
-                        <Button variant="ghost" onClick={() => setActiveSeason(s.id)}>
-                          Ouvrir
-                        </Button>
-                        <Button variant="danger" onClick={() => deleteSeason(s.id)} disabled={state.seasons.length <= 1}>
-                          Supprimer
-                        </Button>
+                      <div className="text-sm font-semibold">
+                        {m.a || "—"} vs {m.b || "—"}
+                        <span className="ml-2 text-white/60">{m.winner ? `→ ${m.winner}` : ""}</span>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            </Section>
-
-            <Section title="Conseils">
-              <div className="text-sm text-white/70 space-y-2">
-                <div>• Crée une saison par année ou par ligue.</div>
-                <div>• Tu peux copier les joueurs pour aller plus vite.</div>
-                <div>• Les saisons restent indépendantes (stats, soirées, rebuys).</div>
-              </div>
-            </Section>
-          </div>
-        )}
-
-        {tab === "PARAMS" && (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <Section title="Joueurs (saison en cours)">
-              <div className="text-sm text-white/70 mb-3">
-                Ajoute tes joueurs ici. Les noms servent partout (matchs, menus, stats). Garde des noms stables (accents inclus).
-              </div>
-              <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-[1fr,auto]">
-                <input
-                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
-                  placeholder="Nom du joueur…"
-                  value={newPlayerName}
-                  onChange={(e) => setNewPlayerName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      addPlayer(newPlayerName);
-                      setNewPlayerName("");
-                    }
-                  }}
-                />
-                <Button
-                  variant="primary"
-                  onClick={() => {
-                    addPlayer(newPlayerName);
-                    setNewPlayerName("");
-                  }}
-                >
-                  Ajouter
-                </Button>
-              </div>
-              <div className="mb-3 grid grid-cols-1 gap-2">
-                <textarea
-                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
-                  rows={3}
-                  placeholder="Ajouter plusieurs joueurs (un par ligne ou séparés par virgule)…"
-                  value={bulkPlayersText}
-                  onChange={(e) => setBulkPlayersText(e.target.value)}
-                />
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    addPlayersFromBulk(bulkPlayersText);
-                    setBulkPlayersText("");
-                  }}
-                >
-                  Ajouter la liste
-                </Button>
-              </div>
-              <div className="space-y-2">
-                {currentSeason.players.length === 0 && (
-                  <div className="text-sm text-white/60">Aucun joueur pour l’instant. Ajoute-les ci-dessus.</div>
-                )}
-                {currentSeason.players.map((p: string, idx: number) => (
-                  <div
-                    key={p}
-                    className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/30 px-3 py-2"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="h-3 w-3 rounded-full" style={{ background: playerColors.get(p) ?? "#ffffff33" }} />
-                      {editingPlayer === p ? (
-                        <input
-                          className="w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-sm text-white outline-none focus:border-white/25"
-                          value={editingPlayerName}
-                          onChange={(e) => setEditingPlayerName(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              renamePlayer(p, editingPlayerName);
-                              setEditingPlayer(null);
-                              setEditingPlayerName("");
-                            }
-                          }}
-                        />
-                      ) : (
-                        <span className="font-semibold">{p}</span>
-                      )}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-white/60">Couleur #{idx + 1}</span>
-                      {editingPlayer === p ? (
-                        <Button
-                          variant="primary"
-                          onClick={() => {
-                            renamePlayer(p, editingPlayerName);
-                            setEditingPlayer(null);
-                            setEditingPlayerName("");
-                          }}
-                        >
-                          Valider
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          onClick={() => {
-                            setEditingPlayer(p);
-                            setEditingPlayerName(p);
-                          }}
-                        >
-                          Renommer
-                        </Button>
-                      )}
-                      <Button variant="danger" onClick={() => removePlayer(p)}>
-                        Supprimer
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button variant="ghost" onClick={() => setMatchStatus(m.id, "PENDING")}>
+                        En attente
+                      </Button>
+                      <Button variant="ghost" onClick={() => setMatchStatus(m.id, "VALIDATED")}>
+                        Valider
+                      </Button>
+                      <Button variant="danger" onClick={() => setMatchStatus(m.id, "CONTESTED")}>
+                        Contester
                       </Button>
                     </div>
                   </div>
                 ))}
+            </div>
+          </Section>
+        )}
+
+        {tab === "PARAMS" && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <Section title="Joueurs (Saison 1)">
+              <div className="text-sm text-white/70 mb-3">
+                Les noms servent partout (matchs, menus, stats). Garde des noms stables (accents inclus).
+              </div>
+              <div className="space-y-2">
+                {state.season.players.map((p, idx) => (
+                  <div
+                    key={p}
+                    className="flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="h-3 w-3 rounded-full" style={{ background: playerColors.get(p) ?? "#ffffff33" }} />
+                      <span className="font-semibold">{p}</span>
+                    </div>
+                    <span className="text-xs text-white/60">Couleur #{idx + 1}</span>
+                  </div>
+                ))}
+              </div>
+            </Section>
+
+            <Section title="Système">
+              <div className="space-y-3 text-sm text-white/70">
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Sauvegardes intelligentes</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button variant="ghost" onClick={() => createSnapshot("Manuel")}>
+                      Snapshot manuel
+                    </Button>
+                    <Button variant="ghost" onClick={() => undoLastAction()}>
+                      Undo
+                    </Button>
+                    <Button variant="ghost" onClick={() => redoLastAction()}>
+                      Redo
+                    </Button>
+                  </div>
+                  <div className="mt-2 space-y-1">
+                    {snapshots.slice(0, 4).map((s) => (
+                      <div key={s.id} className="flex items-center justify-between rounded-lg bg-black/30 px-2 py-1">
+                        <span className="text-xs">{s.label}</span>
+                        <Button variant="ghost" onClick={() => restoreSnapshot(s.id)}>
+                          Restaurer
+                        </Button>
+                      </div>
+                    ))}
+                    {snapshots.length === 0 && <div className="text-xs text-white/50">Aucun snapshot.</div>}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Règles personnalisables</div>
+                  <div className="mt-2">
+                    <Select
+                      value={state.system.rulesProfile}
+                      onChange={(v) =>
+                        updateSystem((system) => ({
+                          ...system,
+                          rulesProfile: (v === "STANDARD" || v === "FUN" || v === "CUSTOM" ? v : "STANDARD") as RulesProfile,
+                        }))
+                      }
+                      options={["STANDARD", "FUN", "CUSTOM"]}
+                    />
+                  </div>
+                  {state.system.rulesProfile === "CUSTOM" && (
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <label className="text-xs">
+                        Points victoire
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          value={state.system.customRules.winPoints}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: { ...system.customRules, winPoints: clampInt(Number(e.target.value), 0, 20) },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Bonus checkout
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          value={state.system.customRules.checkoutBonusPoints}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: {
+                                ...system.customRules,
+                                checkoutBonusPoints: clampInt(Number(e.target.value), 0, 10),
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Jackpot / joueur (€)
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          step="0.1"
+                          min={0}
+                          value={state.system.customRules.jackpotPerPlayerEUR}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: {
+                                ...system.customRules,
+                                jackpotPerPlayerEUR: Math.max(0, Number(e.target.value)),
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Rebuy (€)
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          step="0.1"
+                          min={0}
+                          value={state.system.customRules.rebuyEUR}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: { ...system.customRules, rebuyEUR: Math.max(0, Number(e.target.value)) },
+                            }))
+                          }
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Qualité des données (diagnostics)</div>
+                  <div className="mt-2 space-y-1">
+                    {diagnostics.slice(0, 8).map((issue, i) => (
+                      <div key={`${issue}-${i}`} className="text-xs text-orange-300">
+                        • {issue}
+                      </div>
+                    ))}
+                    {diagnostics.length === 0 && <div className="text-xs text-emerald-300">Aucune incohérence détectée.</div>}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Partage simplifié</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button variant="ghost" onClick={() => exportSeasonSummaryText()}>
+                      Export résumé (.txt)
+                    </Button>
+                    <Button variant="ghost" onClick={() => generateReadOnlyLink()}>
+                      Générer lien lecture seule
+                    </Button>
+                  </div>
+                  {readOnlyLink && (
+                    <textarea
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 p-2 text-xs text-white"
+                      rows={3}
+                      value={readOnlyLink}
+                      readOnly
+                    />
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Audit (qui/quoi/quand)</div>
+                  <div className="mt-2 space-y-1">
+                    {state.system.audit.slice(0, 8).map((a) => (
+                      <div key={a.id} className="text-xs">
+                        <span className="text-white/50">{new Date(a.ts).toLocaleString("fr-FR")} • </span>
+                        <span>{a.action}</span>
+                        {a.details ? <span className="text-white/60"> ({a.details})</span> : null}
+                      </div>
+                    ))}
+                    {state.system.audit.length === 0 && <div className="text-xs text-white/50">Aucun événement.</div>}
+                  </div>
+                </div>
               </div>
             </Section>
 
@@ -3686,7 +3111,7 @@ export default function App() {
                 <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3">
                   <div className="text-xs text-white/60">Règles financières affichées</div>
                   <div className="mt-1">
-                    Entrée : {formatEUR(MONEY.entryFeeEUR)} • Jackpot: +{formatEUR(MONEY.jackpotPerPlayerEUR)}/joueur/soirée • Rebuy: +{formatEUR(MONEY.rebuyEUR)}
+                    Entrée : {formatEUR(MONEY.entryFeeEUR)} • Jackpot: +{formatEUR(effectiveRules.jackpotPerPlayerEUR)}/joueur/soirée • Rebuy: +{formatEUR(effectiveRules.rebuyEUR)}
                   </div>
                   <div className="mt-1">
                     Podium: {formatEUR(MONEY.podiumEUR.first)} / {formatEUR(MONEY.podiumEUR.second)} / {formatEUR(MONEY.podiumEUR.third)}
@@ -3696,8 +3121,6 @@ export default function App() {
             </Section>
           </div>
         )}
-
-        </div>
 
         <div className="mt-8 text-center text-xs text-white/40">Darts League — app locale • v{VERSION}</div>
       </div>
