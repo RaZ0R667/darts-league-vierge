@@ -972,10 +972,10 @@ export default function App() {
 
   function setFunMatchWinner(matchId: string, winner: string) {
     updateFunMode((fun) => {
-      const matches = fun.matches.map((m) => {
+      const matches: CoreMatch[] = fun.matches.map((m): CoreMatch => {
         if (m.id !== matchId) return m;
         const w = normName(winner);
-        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" };
+        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" as const };
       });
       return { ...fun, matches };
     });
