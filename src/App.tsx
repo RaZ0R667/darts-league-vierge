@@ -1828,6 +1828,9 @@ export default function App() {
             <Button variant={tvMode ? "primary" : "ghost"} onClick={() => setTvMode((v) => !v)}>
               {tvMode ? "Quitter Mode TV" : "Mode TV"}
             </Button>
+            <Button variant={tab === "FUN" ? "primary" : "ghost"} onClick={() => setTab(tab === "FUN" ? "SOIREE" : "FUN")}>
+              {tab === "FUN" ? "Retour Saison" : "Mode Fun"}
+            </Button>
             {!tvMode && (
               <Button variant="ghost" onClick={() => startNewSoiree()}>
                 Générer une soirée
@@ -1896,7 +1899,6 @@ export default function App() {
               ["CLASSEMENT", "Classement"],
               ["HISTO", "Historique"],
               ["REBUY", "Re-buy"],
-              ["FUN", "Mode Fun"],
               ["H2H", "Confrontations"],
               ["SAISONS", "Saisons"],
               ["FINANCES", "Finances"],
@@ -1923,7 +1925,6 @@ export default function App() {
                 ["CLASSEMENT", "Classement"],
                 ["HISTO", "Historique"],
                 ["REBUY", "Re-buy"],
-                ["FUN", "Fun"],
                 ["H2H", "H2H"],
                 ["SAISONS", "Saisons"],
                 ["FINANCES", "Finances"],
