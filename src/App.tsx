@@ -12,11 +12,34 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
  */
 
 type Phase = "POULE" | "DEMI" | "PFINAL" | "FINAL";
+type MatchStatus = "PENDING" | "VALIDATED" | "CONTESTED";
+type RulesProfile = "STANDARD" | "FUN" | "CUSTOM";
+
+type RulesConfig = {
+  winPoints: number;
+  smallFinalPoints: number;
+  checkoutBonusPoints: number;
+  jackpotPerPlayerEUR: number;
+  rebuyEUR: number;
+  rebuyWinPointsS1S2: number;
+  rebuyFirstWinPointsS3Plus: number;
+  rebuyNextWinPointsS3Plus: number;
+  defaultPoolFormat: 301 | 501;
+  defaultFinalFormat: 301 | 501;
+};
+
+type AuditEntry = {
+  id: string;
+  ts: number;
+  action: string;
+  details?: string;
+};
 
 type CoreMatch = {
   id: string;
   order: number;
   phase: Phase;
+  status?: MatchStatus | string;
   pool: "A" | "B" | null;
   format: 301 | 501;
   bo: "BO1" | "BO3" | "BO5" | "SEC";
@@ -77,6 +100,11 @@ type AppState = {
   seasons: Season[];
   activeSeasonId: string;
   funMode: FunModeState;
+  system: {
+    rulesProfile: RulesProfile;
+    customRules: RulesConfig;
+    audit: AuditEntry[];
+  };
 };
 
 const STORAGE_KEY = "darts_league_app_v2";
@@ -88,6 +116,37 @@ const MONEY = {
   rebuyEUR: 0.5,
   podiumEUR: { first: 7, second: 3, third: 2 },
 };
+
+const STANDARD_RULES: RulesConfig = {
+  winPoints: 2,
+  smallFinalPoints: 1,
+  checkoutBonusPoints: 1,
+  jackpotPerPlayerEUR: 1,
+  rebuyEUR: 0.5,
+  rebuyWinPointsS1S2: 2,
+  rebuyFirstWinPointsS3Plus: 2,
+  rebuyNextWinPointsS3Plus: 1,
+  defaultPoolFormat: 301,
+  defaultFinalFormat: 501,
+};
+
+const FUN_RULES: RulesConfig = {
+  ...STANDARD_RULES,
+  winPoints: 1,
+  checkoutBonusPoints: 0,
+  jackpotPerPlayerEUR: 0,
+  rebuyEUR: 0,
+};
+
+type SnapshotEntry = {
+  id: string;
+  ts: number;
+  label: string;
+  state: AppState;
+};
+
+const SNAPSHOTS_KEY = "darts_league_snapshots_v1";
+const MAX_SNAPSHOTS = 30;
 
 const PALETTE = [
   "#22c55e",
@@ -138,6 +197,58 @@ function hashString(s: string) {
   return Math.abs(h);
 }
 
+function getRules(profile: RulesProfile, customRules: RulesConfig): RulesConfig {
+  if (profile === "FUN") return FUN_RULES;
+  if (profile === "CUSTOM") return customRules;
+  return STANDARD_RULES;
+}
+
+function getMatchStatus(m: CoreMatch): MatchStatus {
+  if (m.status === "PENDING" || m.status === "VALIDATED" || m.status === "CONTESTED") return m.status;
+  return normName(m.winner) ? "VALIDATED" : "PENDING";
+}
+
+function loadSnapshots(): SnapshotEntry[] {
+  try {
+    const raw = localStorage.getItem(SNAPSHOTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((x: any) => ({
+        id: normName(x?.id) || uid("snap"),
+        ts: Number(x?.ts ?? Date.now()),
+        label: normName(x?.label) || "Snapshot",
+        state: sanitizeState(x?.state),
+      }))
+      .slice(0, MAX_SNAPSHOTS);
+  } catch {
+    return [];
+  }
+}
+
+function saveSnapshots(snaps: SnapshotEntry[]) {
+  try {
+    localStorage.setItem(SNAPSHOTS_KEY, JSON.stringify(snaps.slice(0, MAX_SNAPSHOTS)));
+  } catch {}
+}
+
+function runSeasonDiagnostics(season: Season): string[] {
+  const issues: string[] = [];
+  const players = new Set(season.players);
+  if (season.players.length < 2) issues.push("Pas assez de joueurs enregistrés.");
+  for (const so of season.soirees) {
+    const participants = uniq([...so.pools.A, ...so.pools.B]).filter(isNonEmptyString);
+    if (participants.length === 0) issues.push(`Soirée ${so.number}: aucune poule définie.`);
+    for (const m of so.matches) {
+      if (m.a && !players.has(m.a)) issues.push(`Soirée ${so.number} Match #${m.order}: joueur A inconnu.`);
+      if (m.b && !players.has(m.b)) issues.push(`Soirée ${so.number} Match #${m.order}: joueur B inconnu.`);
+      if (m.winner && m.winner !== m.a && m.winner !== m.b) issues.push(`Soirée ${so.number} Match #${m.order}: vainqueur incohérent.`);
+    }
+  }
+  return issues;
+}
+
 function buildRoundRobinMatches(players: string[], format: 301 | 501): CoreMatch[] {
   const pairs: Array<[string, string]> = [];
   for (let i = 0; i < players.length; i++) {
@@ -149,6 +260,7 @@ function buildRoundRobinMatches(players: string[], format: 301 | 501): CoreMatch
     id: uid("funm"),
     order: idx + 1,
     phase: "POULE",
+    status: "PENDING",
     pool: null,
     format,
     bo: "BO3",
@@ -176,6 +288,7 @@ function poolMatchesFor4(players: string[], pool: "A" | "B"): CoreMatch[] {
     id: uid("m"),
     order: idx + 1,
     phase: "POULE",
+    status: "PENDING",
     pool,
     format: 301,
     bo: "BO3",
@@ -202,7 +315,8 @@ function computePointsFromMatches(
   matches: CoreMatch[],
   rebuyMatches: RebuyMatch[],
   seasonSoireeNumber?: number,
-  season?: Season
+  season?: Season,
+  rules: RulesConfig = STANDARD_RULES
 ) {
   const pts = new Map<string, number>();
   const wins = new Map<string, number>();
@@ -216,17 +330,17 @@ function computePointsFromMatches(
   for (const m of matches) {
     const w = normName(m.winner);
     if (w) {
-      const basePts = m.phase === "PFINAL" ? 1 : 2;
+      const basePts = m.phase === "PFINAL" ? rules.smallFinalPoints : rules.winPoints;
       add(pts, w, basePts);
       add(wins, w, 1);
     }
 
     if (m.checkoutBy === "A" && normName(m.a)) {
       add(bonus, normName(m.a), 1);
-      add(pts, normName(m.a), 1);
+      add(pts, normName(m.a), rules.checkoutBonusPoints);
     } else if (m.checkoutBy === "B" && normName(m.b)) {
       add(bonus, normName(m.b), 1);
-      add(pts, normName(m.b), 1);
+      add(pts, normName(m.b), rules.checkoutBonusPoints);
     }
   }
 
@@ -259,14 +373,19 @@ function computePointsFromMatches(
 
     if (soN > 0 && soN <= 2) {
       if (w === buyer) {
-        add(pts, buyer, 2);
+        add(pts, buyer, rules.rebuyWinPointsS1S2);
         add(wins, buyer, 1);
       }
       incLocalDone(buyer);
       continue;
     }
 
-    const winPts = soN >= 3 ? (doneBefore(buyer) === 0 ? 2 : 1) : 2;
+    const winPts =
+      soN >= 3
+        ? doneBefore(buyer) === 0
+          ? rules.rebuyFirstWinPointsS3Plus
+          : rules.rebuyNextWinPointsS3Plus
+        : rules.rebuyWinPointsS1S2;
 
     if (w === buyer) {
       add(pts, buyer, winPts);
@@ -279,7 +398,7 @@ function computePointsFromMatches(
   return { pts, wins, bonus };
 }
 
-function aggregateSeasonStats(season: Season) {
+function aggregateSeasonStats(season: Season, rules: RulesConfig = STANDARD_RULES) {
   const pts = new Map<string, number>();
   const wins = new Map<string, number>();
   const bonus = new Map<string, number>();
@@ -290,7 +409,7 @@ function aggregateSeasonStats(season: Season) {
   };
 
   for (const s of season.soirees) {
-    const { pts: p, wins: w, bonus: b } = computePointsFromMatches(s.matches, s.rebuys, s.number, season);
+    const { pts: p, wins: w, bonus: b } = computePointsFromMatches(s.matches, s.rebuys, s.number, season, rules);
     for (const [k, v] of p.entries()) add(pts, k, v);
     for (const [k, v] of w.entries()) add(wins, k, v);
     for (const [k, v] of b.entries()) add(bonus, k, v);
@@ -318,10 +437,10 @@ function aggregateSeasonStats(season: Season) {
   return { table, pts, wins, bonus };
 }
 
-function computeJackpotEUR(season: Season) {
+function computeJackpotEUR(season: Season, rules: RulesConfig = STANDARD_RULES) {
   const base = season.soirees.reduce((sum, s) => sum + s.pools.A.length + s.pools.B.length, 0);
   const rebuyCount = season.soirees.reduce((sum, s) => sum + s.rebuys.length, 0);
-  return base * MONEY.jackpotPerPlayerEUR + rebuyCount * MONEY.rebuyEUR;
+  return base * rules.jackpotPerPlayerEUR + rebuyCount * rules.rebuyEUR;
 }
 
 function computeWinStreaks(season: Season) {
@@ -498,6 +617,11 @@ function makeInitialState(): AppState {
     seasons: [season],
     activeSeasonId: season.id,
     funMode: makeEmptyFunMode(),
+    system: {
+      rulesProfile: "STANDARD",
+      customRules: { ...STANDARD_RULES },
+      audit: [],
+    },
   };
 }
 
@@ -531,6 +655,12 @@ function sanitizeState(raw: any): AppState {
             id: normName(m?.id) || uid("m"),
             order: clampInt(Number(m?.order ?? midx + 1), 1, 9999),
             phase,
+            status:
+              m?.status === "PENDING" || m?.status === "VALIDATED" || m?.status === "CONTESTED"
+                ? m.status
+                : winner
+                  ? "VALIDATED"
+                  : "PENDING",
             pool: m?.pool === "A" || m?.pool === "B" ? m.pool : null,
             format: Number(m?.format) === 501 ? 501 : 301,
             bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as any,
@@ -613,6 +743,12 @@ function sanitizeState(raw: any): AppState {
       id: normName(m?.id) || uid("funm"),
       order: clampInt(Number(m?.order ?? idx + 1), 1, 9999),
       phase: (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase,
+      status:
+        m?.status === "PENDING" || m?.status === "VALIDATED" || m?.status === "CONTESTED"
+          ? m.status
+          : normName(m?.winner)
+            ? "VALIDATED"
+            : "PENDING",
       pool: null,
       format: Number(m?.format) === 501 ? 501 : 301,
       bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as "BO1" | "BO3" | "BO5" | "SEC",
@@ -630,6 +766,41 @@ function sanitizeState(raw: any): AppState {
       positions: Array.isArray(r?.positions) ? r.positions.map(normName).filter(isNonEmptyString) : [],
     }));
 
+    const profileRaw = normName(raw.system?.rulesProfile);
+    const rulesProfile: RulesProfile =
+      profileRaw === "STANDARD" || profileRaw === "FUN" || profileRaw === "CUSTOM" ? profileRaw : "STANDARD";
+    const customRulesRaw = raw.system?.customRules ?? {};
+    const customRules: RulesConfig = {
+      winPoints: clampInt(Number(customRulesRaw.winPoints ?? STANDARD_RULES.winPoints), 0, 20),
+      smallFinalPoints: clampInt(Number(customRulesRaw.smallFinalPoints ?? STANDARD_RULES.smallFinalPoints), 0, 20),
+      checkoutBonusPoints: clampInt(Number(customRulesRaw.checkoutBonusPoints ?? STANDARD_RULES.checkoutBonusPoints), 0, 10),
+      jackpotPerPlayerEUR: Math.max(0, Number(customRulesRaw.jackpotPerPlayerEUR ?? STANDARD_RULES.jackpotPerPlayerEUR)),
+      rebuyEUR: Math.max(0, Number(customRulesRaw.rebuyEUR ?? STANDARD_RULES.rebuyEUR)),
+      rebuyWinPointsS1S2: clampInt(Number(customRulesRaw.rebuyWinPointsS1S2 ?? STANDARD_RULES.rebuyWinPointsS1S2), 0, 20),
+      rebuyFirstWinPointsS3Plus: clampInt(
+        Number(customRulesRaw.rebuyFirstWinPointsS3Plus ?? STANDARD_RULES.rebuyFirstWinPointsS3Plus),
+        0,
+        20
+      ),
+      rebuyNextWinPointsS3Plus: clampInt(
+        Number(customRulesRaw.rebuyNextWinPointsS3Plus ?? STANDARD_RULES.rebuyNextWinPointsS3Plus),
+        0,
+        20
+      ),
+      defaultPoolFormat: Number(customRulesRaw.defaultPoolFormat) === 501 ? 501 : 301,
+      defaultFinalFormat: Number(customRulesRaw.defaultFinalFormat) === 301 ? 301 : 501,
+    };
+    const audit: AuditEntry[] = Array.isArray(raw.system?.audit)
+      ? raw.system.audit
+          .map((x: any) => ({
+            id: normName(x?.id) || uid("audit"),
+            ts: Number(x?.ts ?? Date.now()),
+            action: normName(x?.action) || "Action",
+            details: normName(x?.details) || undefined,
+          }))
+          .slice(0, 300)
+      : [];
+
     return {
       version: v || VERSION,
       seasons,
@@ -646,6 +817,11 @@ function sanitizeState(raw: any): AppState {
           .filter((m) => m.phase !== "POULE")
           .sort((a, b) => a.order - b.order),
         positionRounds: funPositionRounds,
+      },
+      system: {
+        rulesProfile,
+        customRules,
+        audit,
       },
     };
   } catch {
@@ -790,7 +966,7 @@ export default function App() {
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState<AppState>(() => loadState());
   const [tab, setTab] = useState<
-    "SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "FUN" | "H2H" | "FINANCES" | "PARAMS" | "SAISONS"
+    "SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "FUN" | "H2H" | "FINANCES" | "ARBITRAGE" | "PARAMS" | "SAISONS"
   >("SOIREE");
   const [tvMode, setTvMode] = useState(false);
   const [, setTvIndex] = useState(0);
@@ -809,6 +985,9 @@ export default function App() {
   const [importText, setImportText] = useState("");
   const [showExport, setShowExport] = useState(false);
   const [exportText, setExportText] = useState("");
+  const [snapshots, setSnapshots] = useState<SnapshotEntry[]>(() => loadSnapshots());
+  const [readOnlyLink, setReadOnlyLink] = useState("");
+  const [readOnlyMode, setReadOnlyMode] = useState(false);
   const [newPlayerName, setNewPlayerName] = useState("");
   const [bulkPlayersText, setBulkPlayersText] = useState("");
   const [editingPlayer, setEditingPlayer] = useState<string | null>(null);
@@ -825,6 +1004,11 @@ export default function App() {
   });
 
   const savingRef = useRef<number | null>(null);
+  const undoStackRef = useRef<AppState[]>([]);
+  const redoStackRef = useRef<AppState[]>([]);
+  const historyNavRef = useRef(false);
+  const lastSerializedRef = useRef(JSON.stringify(state));
+  const lastAutoSnapshotAtRef = useRef(0);
 
   const currentSeason = useMemo<Season>(() => {
     return currentSeasons.find((s: Season) => s.id === state.activeSeasonId) ?? currentSeasons[0];
@@ -839,6 +1023,50 @@ export default function App() {
       if (savingRef.current) window.clearTimeout(savingRef.current);
     };
   }, [state]);
+
+  useEffect(() => {
+    const serialized = JSON.stringify(state);
+    if (historyNavRef.current) {
+      historyNavRef.current = false;
+      lastSerializedRef.current = serialized;
+      return;
+    }
+    if (serialized !== lastSerializedRef.current) {
+      undoStackRef.current.push(sanitizeState(JSON.parse(lastSerializedRef.current)));
+      if (undoStackRef.current.length > 80) undoStackRef.current = undoStackRef.current.slice(-80);
+      redoStackRef.current = [];
+      lastSerializedRef.current = serialized;
+    }
+
+    const now = Date.now();
+    if (now - lastAutoSnapshotAtRef.current > 1000 * 60 * 5) {
+      const snap: SnapshotEntry = {
+        id: uid("snap"),
+        ts: now,
+        label: `Auto ${new Date(now).toLocaleString("fr-FR")}`,
+        state: sanitizeState(JSON.parse(serialized)),
+      };
+      const next = [snap, ...snapshots].slice(0, MAX_SNAPSHOTS);
+      setSnapshots(next);
+      saveSnapshots(next);
+      lastAutoSnapshotAtRef.current = now;
+    }
+  }, [state, snapshots]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const hash = window.location.hash || "";
+    if (!hash.startsWith("#readonly=")) return;
+    try {
+      const payload = hash.slice("#readonly=".length);
+      const decoded = decodeURIComponent(escape(window.atob(payload)));
+      const parsed = JSON.parse(decoded);
+      const ro = sanitizeState(parsed);
+      setState(ro);
+      setTab("CLASSEMENT");
+      setReadOnlyMode(true);
+    } catch {}
+  }, []);
 
   useEffect(() => {
     try {
@@ -860,11 +1088,16 @@ export default function App() {
     }
   }, [currentSeason.soirees, selectedSoireeNumber]);
 
-  const seasonStats = useMemo(() => aggregateSeasonStats(currentSeason), [currentSeason]);
-  const jackpotEUR = useMemo(() => computeJackpotEUR(currentSeason), [currentSeason]);
+  const effectiveRules = useMemo(
+    () => getRules(state.system.rulesProfile, state.system.customRules),
+    [state.system.rulesProfile, state.system.customRules]
+  );
+  const seasonStats = useMemo(() => aggregateSeasonStats(currentSeason, effectiveRules), [currentSeason, effectiveRules]);
+  const jackpotEUR = useMemo(() => computeJackpotEUR(currentSeason, effectiveRules), [currentSeason, effectiveRules]);
   const streaks = useMemo(() => computeWinStreaks(currentSeason), [currentSeason]);
   const h2h = useMemo(() => computeHeadToHead(currentSeason), [currentSeason]);
   const advancedStats = useMemo(() => computeAdvancedStats(currentSeason), [currentSeason]);
+  const diagnostics = useMemo(() => runSeasonDiagnostics(currentSeason), [currentSeason]);
 
   const playerColors = useMemo(() => {
     const map = new Map<string, string>();
@@ -890,7 +1123,7 @@ export default function App() {
       const players = currentSoiree.pools[pool];
       const relevant = poolMatches.filter((m: CoreMatch) => m.pool === pool);
 
-      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
+      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason, effectiveRules);
 
       const rows = players.map((p: string) => ({
         name: p,
@@ -906,7 +1139,7 @@ export default function App() {
     };
 
     return { A: calcPool("A"), B: calcPool("B") };
-  }, [currentSoiree.matches, currentSoiree.pools, currentSoiree.number, currentSeason]);
+  }, [currentSoiree.matches, currentSoiree.pools, currentSoiree.number, currentSeason, effectiveRules]);
 
   const allSoireeNumbers = useMemo(() => {
     return [...currentSeason.soirees].map((s: Soiree) => s.number).sort((a: number, b: number) => a - b);
@@ -1023,13 +1256,105 @@ export default function App() {
 
   function updateSeason(mutator: (season: Season) => Season) {
     setState((prev) => {
+      if (readOnlyMode) return prev;
       const seasons = prev.seasons.map((s) => (s.id === prev.activeSeasonId ? mutator(s) : s));
       return { ...prev, seasons };
     });
   }
 
+  function updateSystem(mutator: (system: AppState["system"]) => AppState["system"]) {
+    setState((prev) => (readOnlyMode ? prev : { ...prev, system: mutator(prev.system) }));
+  }
+
+  function logAudit(action: string, details?: string) {
+    updateSystem((system) => ({
+      ...system,
+      audit: [{ id: uid("audit"), ts: Date.now(), action, details }, ...system.audit].slice(0, 300),
+    }));
+  }
+
+  function createSnapshot(label = "Manuel") {
+    const snap: SnapshotEntry = {
+      id: uid("snap"),
+      ts: Date.now(),
+      label,
+      state: sanitizeState(JSON.parse(JSON.stringify(state))),
+    };
+    const next = [snap, ...snapshots].slice(0, MAX_SNAPSHOTS);
+    setSnapshots(next);
+    saveSnapshots(next);
+    logAudit("Snapshot", label);
+  }
+
+  function restoreSnapshot(snapshotId: string) {
+    const snap = snapshots.find((x) => x.id === snapshotId);
+    if (!snap) return;
+    historyNavRef.current = true;
+    setState(sanitizeState(snap.state));
+    logAudit("Restauration snapshot", snap.label);
+  }
+
+  function undoLastAction() {
+    const previous = undoStackRef.current.pop();
+    if (!previous) return;
+    redoStackRef.current.push(sanitizeState(JSON.parse(JSON.stringify(state))));
+    historyNavRef.current = true;
+    setState(sanitizeState(previous));
+    logAudit("Undo");
+  }
+
+  function redoLastAction() {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current.push(sanitizeState(JSON.parse(JSON.stringify(state))));
+    historyNavRef.current = true;
+    setState(sanitizeState(next));
+    logAudit("Redo");
+  }
+
+  function exportSeasonSummaryText() {
+    const lines: string[] = [];
+    lines.push(`Résumé ${currentSeason.name}`);
+    lines.push(`Date: ${new Date().toLocaleString("fr-FR")}`);
+    lines.push("");
+    lines.push("Classement:");
+    seasonStats.table.forEach((r, i) => lines.push(`${i + 1}. ${r.name} - ${r.pts} pts (${r.wins} V)`));
+    lines.push("");
+    lines.push(`Jackpot: ${formatEUR(jackpotEUR)}`);
+    lines.push(`Soirées: ${currentSeason.soirees.length}`);
+    const text = lines.join("\n");
+    downloadTextFile(`resume_${currentSeason.name.replace(/\s+/g, "_")}.txt`, text, "text/plain;charset=utf-8");
+    logAudit("Export résumé");
+  }
+
+  function exportSeasonSummaryPDF() {
+    const rows = seasonStats.table.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.pts}</td><td>${r.wins}</td></tr>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Résumé ${currentSeason.name}</title>
+    <style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;padding:24px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;text-align:left}</style>
+    </head><body><h1>Résumé ${currentSeason.name}</h1><p>Date: ${new Date().toLocaleString("fr-FR")}</p><p>Jackpot: ${formatEUR(jackpotEUR)}</p>
+    <table><thead><tr><th>#</th><th>Joueur</th><th>Points</th><th>Victoires</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    w.print();
+    logAudit("Export résumé PDF");
+  }
+
+  async function generateReadOnlyLink() {
+    const serialized = JSON.stringify(state);
+    const payload = window.btoa(unescape(encodeURIComponent(serialized)));
+    const url = `${window.location.origin}${window.location.pathname}#readonly=${payload}`;
+    setReadOnlyLink(url);
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {}
+    logAudit("Lien lecture seule");
+  }
+
   function updateFunMode(mutator: (funMode: FunModeState) => FunModeState) {
-    setState((prev) => ({ ...prev, funMode: mutator(prev.funMode) }));
+    setState((prev) => (readOnlyMode ? prev : { ...prev, funMode: mutator(prev.funMode) }));
   }
 
   function addFunPlayer() {
@@ -1070,7 +1395,8 @@ export default function App() {
       const matches: CoreMatch[] = fun.matches.map((m): CoreMatch => {
         if (m.id !== matchId) return m;
         const w = normName(winner);
-        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" as const };
+        const valid = w === m.a || w === m.b;
+        return { ...m, winner: valid ? w : "", status: valid ? "VALIDATED" : "PENDING", checkout100: false, checkoutBy: "" as const };
       });
       return { ...fun, matches };
     });
@@ -1095,10 +1421,10 @@ export default function App() {
       if (funStandings.length < 4) return fun;
       const top4 = funStandings.slice(0, 4).map((r) => r.name);
       const finals: CoreMatch[] = [
-        { id: uid("ff"), order: 1, phase: "DEMI", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[0], b: top4[3], winner: "", checkout100: false, checkoutBy: "" },
-        { id: uid("ff"), order: 2, phase: "DEMI", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[1], b: top4[2], winner: "", checkout100: false, checkoutBy: "" },
-        { id: uid("ff"), order: 3, phase: "PFINAL", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
-        { id: uid("ff"), order: 4, phase: "FINAL", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
+        { id: uid("ff"), order: 1, phase: "DEMI", status: "PENDING", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[0], b: top4[3], winner: "", checkout100: false, checkoutBy: "" },
+        { id: uid("ff"), order: 2, phase: "DEMI", status: "PENDING", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[1], b: top4[2], winner: "", checkout100: false, checkoutBy: "" },
+        { id: uid("ff"), order: 3, phase: "PFINAL", status: "PENDING", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
+        { id: uid("ff"), order: 4, phase: "FINAL", status: "PENDING", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
       ];
       return { ...fun, finals };
     });
@@ -1109,7 +1435,8 @@ export default function App() {
       const finals = fun.finals.map((m) => {
         if (m.id !== matchId) return m;
         const w = normName(winner);
-        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" as const };
+        const valid = w === m.a || w === m.b;
+        return { ...m, winner: valid ? w : "", status: valid ? "VALIDATED" : "PENDING", checkout100: false, checkoutBy: "" as const };
       });
 
       const demis = finals.filter((m) => m.phase === "DEMI").sort((a, b) => a.order - b.order);
@@ -1125,9 +1452,11 @@ export default function App() {
         final.a = w1 && w2 ? w1 : "";
         final.b = w1 && w2 ? w2 : "";
         if (final.winner && final.winner !== final.a && final.winner !== final.b) final.winner = "";
+        final.status = final.winner ? "VALIDATED" : "PENDING";
         pfinal.a = l1 && l2 ? l1 : "";
         pfinal.b = l1 && l2 ? l2 : "";
         if (pfinal.winner && pfinal.winner !== pfinal.a && pfinal.winner !== pfinal.b) pfinal.winner = "";
+        pfinal.status = pfinal.winner ? "VALIDATED" : "PENDING";
       }
       return { ...fun, finals: [...finals] };
     });
@@ -1297,6 +1626,7 @@ export default function App() {
   }
 
   function addSeason() {
+    if (readOnlyMode) return;
     setState((prev) => {
       const name = normName(newSeasonName) || `Saison ${prev.seasons.length + 1}`;
       const season = makeEmptySeason(name);
@@ -1313,6 +1643,7 @@ export default function App() {
   }
 
   function setActiveSeason(id: string) {
+    if (readOnlyMode) return;
     setState((prev) => {
       const season = prev.seasons.find((s) => s.id === id) ?? prev.seasons[0];
       const max = Math.max(...season.soirees.map((s) => s.number));
@@ -1322,6 +1653,7 @@ export default function App() {
   }
 
   function renameSeason(id: string, nameRaw: string) {
+    if (readOnlyMode) return;
     const name = normName(nameRaw);
     if (!name) return;
     setState((prev) => ({
@@ -1331,6 +1663,7 @@ export default function App() {
   }
 
   function deleteSeason(id: string) {
+    if (readOnlyMode) return;
     setState((prev) => {
       if (prev.seasons.length <= 1) return prev;
       const seasons = prev.seasons.filter((s) => s.id !== id);
@@ -1353,12 +1686,14 @@ export default function App() {
   }
 
   function resetAll() {
+    if (readOnlyMode) return;
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {}
     setState(makeInitialState());
     setSelectedSoireeNumber(1);
     setTab("SOIREE");
+    logAudit("Reset complet");
   }
 
   function exportSeasonFile() {
@@ -1372,6 +1707,7 @@ export default function App() {
 
     setExportText(payload);
     setShowExport(true);
+    logAudit("Export JSON fichier");
   }
 
   async function exportSeasonClipboard() {
@@ -1379,15 +1715,18 @@ export default function App() {
       const payload = JSON.stringify(state, null, 2);
       await navigator.clipboard.writeText(payload);
       alert("Export copié dans le presse-papiers ✅");
+      logAudit("Export JSON clipboard");
     } catch {
       const payload = JSON.stringify(state, null, 2);
       setExportText(payload);
       setShowExport(true);
       alert("Copie automatique bloquée. L’export s’affiche : copie/colle-le dans un fichier .json ✅");
+      logAudit("Export JSON fallback");
     }
   }
 
   function importSeasonFromText(text: string) {
+    if (readOnlyMode) return;
     try {
       const parsed = JSON.parse(text);
       const next = sanitizeState(parsed);
@@ -1398,6 +1737,7 @@ export default function App() {
       setTab("SOIREE");
       setShowImport(false);
       setImportText("");
+      logAudit("Import JSON");
     } catch {
       alert("Import impossible : JSON invalide.");
     }
@@ -1412,6 +1752,13 @@ export default function App() {
       alert("Ajoute d’abord les joueurs (au moins 2).");
       return;
     }
+    const issues = runSeasonDiagnostics(currentSeason);
+    if (issues.length > 0) {
+      const proceed = window.confirm(
+        `Diagnostics: ${issues.length} incohérence(s) détectée(s).\n- ${issues.slice(0, 3).join("\n- ")}\n\nContinuer ?`
+      );
+      if (!proceed) return;
+    }
     updateSeason((season) => {
       const nextNumber = Math.max(...season.soirees.map((s) => s.number)) + 1;
       const players = season.players;
@@ -1421,15 +1768,15 @@ export default function App() {
         const sh = shuffle(players);
         pools = { A: sh.slice(0, 4), B: sh.slice(4, 8) };
       } else {
-        const ranked = aggregateSeasonStats(season).table.map((x) => x.name);
+        const ranked = aggregateSeasonStats(season, effectiveRules).table.map((x) => x.name);
         pools = {
           A: [ranked[0], ranked[2], ranked[4], ranked[6]].filter(Boolean),
           B: [ranked[1], ranked[3], ranked[5], ranked[7]].filter(Boolean),
         };
       }
 
-          const poolA = poolMatchesFor4(pools.A, "A");
-          const poolB = poolMatchesFor4(pools.B, "B");
+          const poolA = poolMatchesFor4(pools.A, "A").map((m) => ({ ...m, format: effectiveRules.defaultPoolFormat }));
+          const poolB = poolMatchesFor4(pools.B, "B").map((m) => ({ ...m, format: effectiveRules.defaultPoolFormat }));
           const inter = interleavePools(poolA, poolB);
 
           const finals: CoreMatch[] = [
@@ -1437,8 +1784,9 @@ export default function App() {
               id: uid("m"),
               order: inter.length + 1,
               phase: "DEMI",
+              status: "PENDING",
               pool: null,
-              format: 301,
+              format: effectiveRules.defaultPoolFormat,
               bo: "BO3",
               maxTurns: 10,
               a: "",
@@ -1451,8 +1799,9 @@ export default function App() {
               id: uid("m"),
               order: inter.length + 2,
               phase: "DEMI",
+              status: "PENDING",
               pool: null,
-              format: 301,
+              format: effectiveRules.defaultPoolFormat,
               bo: "BO3",
               maxTurns: 10,
               a: "",
@@ -1465,8 +1814,9 @@ export default function App() {
               id: uid("m"),
               order: inter.length + 3,
               phase: "PFINAL",
+              status: "PENDING",
               pool: null,
-              format: 301,
+              format: effectiveRules.defaultPoolFormat,
               bo: "BO3",
               maxTurns: 10,
               a: "",
@@ -1479,8 +1829,9 @@ export default function App() {
               id: uid("m"),
               order: inter.length + 4,
               phase: "FINAL",
+              status: "PENDING",
               pool: null,
-              format: 501,
+              format: effectiveRules.defaultFinalFormat,
               bo: "BO3",
               maxTurns: 10,
               a: "",
@@ -1507,6 +1858,7 @@ export default function App() {
 
       return { ...season, soirees: [...season.soirees, newSoiree] };
     });
+    logAudit("Nouvelle soirée générée");
 
     setTimeout(() => {
       const max = Math.max(...currentSeason.soirees.map((s: Soiree) => s.number)) + 1;
@@ -1526,6 +1878,7 @@ export default function App() {
           return {
             ...m,
             winner: valid ? w : "",
+            status: valid ? "VALIDATED" : "PENDING",
             checkoutBy: !m.a || !m.b ? "" : m.checkoutBy,
             checkout100: !m.a || !m.b ? false : Boolean(m.checkoutBy),
           } as CoreMatch;
@@ -1534,6 +1887,18 @@ export default function App() {
       });
       return { ...season, soirees };
     });
+  }
+
+  function setMatchStatus(matchId: string, status: MatchStatus) {
+    updateSeason((season) => {
+      const soirees = season.soirees.map((s: Soiree) => {
+        if (s.number !== currentSoiree.number) return s;
+        const matches = s.matches.map((m: CoreMatch) => (m.id === matchId ? { ...m, status } : m));
+        return { ...s, matches };
+      });
+      return { ...season, soirees };
+    });
+    logAudit("Statut match", `${matchId} -> ${status}`);
   }
 
   function setMatchCheckoutBy(matchId: string, checkoutBy: "" | "A" | "B") {
@@ -1576,7 +1941,7 @@ export default function App() {
     const calcPool = (pool: "A" | "B") => {
       const players = currentSoiree.pools[pool];
       const relevant = poolMatches.filter((m: CoreMatch) => m.pool === pool);
-      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason);
+      const { pts, wins, bonus } = computePointsFromMatches(relevant, [], currentSoiree.number, currentSeason, effectiveRules);
       const rows = players.map((p: string) => ({
         name: p,
         pts: pts.get(p) ?? 0,
@@ -1610,10 +1975,12 @@ export default function App() {
           if (m.phase !== "DEMI") return m;
           const demiIndex = demisSorted.findIndex((x: CoreMatch) => x.id === m.id);
           if (demiIndex === 0) {
-            return { ...m, a: A1, b: B2, winner: m.winner && (m.winner === A1 || m.winner === B2) ? m.winner : "" };
+            const winner = m.winner && (m.winner === A1 || m.winner === B2) ? m.winner : "";
+            return { ...m, a: A1, b: B2, winner, status: winner ? "VALIDATED" : "PENDING" };
           }
           if (demiIndex === 1) {
-            return { ...m, a: B1, b: A2, winner: m.winner && (m.winner === B1 || m.winner === A2) ? m.winner : "" };
+            const winner = m.winner && (m.winner === B1 || m.winner === A2) ? m.winner : "";
+            return { ...m, a: B1, b: A2, winner, status: winner ? "VALIDATED" : "PENDING" };
           }
           return m;
         });
@@ -1647,13 +2014,13 @@ export default function App() {
             const a = w1 && w2 ? w1 : "";
             const b = w1 && w2 ? w2 : "";
             const keepWinner = m.winner && (m.winner === a || m.winner === b) ? m.winner : "";
-            return { ...m, a, b, winner: keepWinner };
+            return { ...m, a, b, winner: keepWinner, status: keepWinner ? "VALIDATED" : "PENDING" };
           }
           if (m.phase === "PFINAL") {
             const a = l1 && l2 ? l1 : "";
             const b = l1 && l2 ? l2 : "";
             const keepWinner = m.winner && (m.winner === a || m.winner === b) ? m.winner : "";
-            return { ...m, a, b, winner: keepWinner };
+            return { ...m, a, b, winner: keepWinner, status: keepWinner ? "VALIDATED" : "PENDING" };
           }
           return m;
         });
@@ -1716,7 +2083,7 @@ export default function App() {
     const third = normName(pfinal?.winner ?? "");
 
     if (!wFinal || !second || !third) {
-      const { pts, wins } = computePointsFromMatches(currentSoiree.matches, [], currentSoiree.number, currentSeason);
+      const { pts, wins } = computePointsFromMatches(currentSoiree.matches, [], currentSoiree.number, currentSeason, effectiveRules);
       const rows = currentSeason.players.map((p: string) => ({
         name: p,
         pts: pts.get(p) ?? 0,
@@ -1739,7 +2106,7 @@ export default function App() {
       third,
       provisional: false as const,
     };
-  }, [currentSoiree.matches, currentSoiree.number, currentSeason]);
+  }, [currentSoiree.matches, currentSoiree.number, currentSeason, effectiveRules]);
 
 
   const totalGainsEUR = useMemo(() => {
@@ -1758,7 +2125,7 @@ export default function App() {
       const third = normName(pfinal?.winner ?? "");
 
       if (!wFinal || !second || !third) {
-        const { pts, wins } = computePointsFromMatches(s.matches, [], s.number, currentSeason);
+        const { pts, wins } = computePointsFromMatches(s.matches, [], s.number, currentSeason, effectiveRules);
         const rows = currentSeason.players.map((p: string) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
         rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
           b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
@@ -1779,7 +2146,7 @@ export default function App() {
     const out = currentSeason.players.map((p: string) => ({ player: p, eur: totals.get(p) ?? 0 }));
     out.sort((a: { player: string; eur: number }, b: { player: string; eur: number }) => b.eur - a.eur || a.player.localeCompare(b.player));
     return out;
-  }, [currentSeason.players, currentSeason.soirees]);
+  }, [currentSeason.players, currentSeason.soirees, effectiveRules]);
 
   const rankingTimeline = useMemo(() => {
     const players = currentSeason.players;
@@ -1791,7 +2158,7 @@ export default function App() {
     players.forEach((p: string) => series.set(p, []));
 
     for (const s of soirees) {
-      const { pts, wins, bonus } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
+      const { pts, wins, bonus } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason, effectiveRules);
       for (const p of players) {
         const t = totals.get(p)!;
         totals.set(p, {
@@ -1819,7 +2186,7 @@ export default function App() {
       labels: soirees.map((s: Soiree) => s.number),
       series: players.map((p: string) => ({ player: p, ranks: series.get(p) ?? [] })),
     };
-  }, [currentSeason.players, currentSeason.soirees]);
+  }, [currentSeason.players, currentSeason.soirees, effectiveRules]);
 
   useEffect(() => {
     const maxStep = Math.max(0, rankingTimeline.labels.length - 1);
@@ -1855,6 +2222,7 @@ export default function App() {
               <Pill color="#22c55e">Jackpot: {formatEUR(jackpotEUR)}</Pill>
               <Pill>Joueurs: {currentSeason.players.length}</Pill>
               <Pill>Soirées: {currentSeason.soirees.length}</Pill>
+              {readOnlyMode && <Pill color="#eab308">Lecture seule</Pill>}
               {tvMode && <Pill color="#38bdf8">MODE TV</Pill>}
               {tvMode && <Pill>Écran: {tvLabels[tab] ?? tab}</Pill>}
             </div>
@@ -1916,7 +2284,7 @@ export default function App() {
             <div className="text-xs text-white/60">Jackpot actuel</div>
             <div className="mt-2 text-4xl font-extrabold">{formatEUR(jackpotEUR)}</div>
             <div className="mt-2 text-xs text-white/60">
-              +{formatEUR(MONEY.jackpotPerPlayerEUR)} / joueur / soirée • +{formatEUR(MONEY.rebuyEUR)} / re-buy
+              +{formatEUR(effectiveRules.jackpotPerPlayerEUR)} / joueur / soirée • +{formatEUR(effectiveRules.rebuyEUR)} / re-buy
             </div>
           </div>
           <div className="rounded-2xl border border-white/10 bg-black/30 p-5">
@@ -1938,6 +2306,7 @@ export default function App() {
               ["H2H", "Confrontations"],
               ["SAISONS", "Saisons"],
               ["FINANCES", "Finances"],
+              ["ARBITRAGE", "Arbitrage"],
               ["PARAMS", "Paramètres"],
             ] as const
           ).map(([k, label]) => (
@@ -1964,6 +2333,7 @@ export default function App() {
                 ["H2H", "H2H"],
                 ["SAISONS", "Saisons"],
                 ["FINANCES", "Finances"],
+                ["ARBITRAGE", "Arbitrage"],
                 ["PARAMS", "Params"],
               ] as const
             ).map(([k, label]) => (
@@ -2023,9 +2393,9 @@ export default function App() {
                     .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
                     .map((m: CoreMatch) => {
                       const winner = normName(m.winner);
-                      const bonusA = m.checkoutBy === "A" ? 1 : 0;
-                      const bonusB = m.checkoutBy === "B" ? 1 : 0;
-                      const basePts = m.phase === "PFINAL" ? 1 : 2;
+                      const bonusA = m.checkoutBy === "A" ? effectiveRules.checkoutBonusPoints : 0;
+                      const bonusB = m.checkoutBy === "B" ? effectiveRules.checkoutBonusPoints : 0;
+                      const basePts = m.phase === "PFINAL" ? effectiveRules.smallFinalPoints : effectiveRules.winPoints;
                       const ptsA = (winner && winner === m.a ? basePts : 0) + bonusA;
                       const ptsB = (winner && winner === m.b ? basePts : 0) + bonusB;
                       const pickWinner = (name: string) => {
@@ -2178,9 +2548,9 @@ export default function App() {
                         .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
                         .map((m: CoreMatch) => {
                           const winner = normName(m.winner);
-                          const bonusA = m.checkoutBy === "A" ? 1 : 0;
-                          const bonusB = m.checkoutBy === "B" ? 1 : 0;
-                          const basePts = m.phase === "PFINAL" ? 1 : 2;
+                          const bonusA = m.checkoutBy === "A" ? effectiveRules.checkoutBonusPoints : 0;
+                          const bonusB = m.checkoutBy === "B" ? effectiveRules.checkoutBonusPoints : 0;
+                          const basePts = m.phase === "PFINAL" ? effectiveRules.smallFinalPoints : effectiveRules.winPoints;
                           const ptsA = (winner && winner === m.a ? basePts : 0) + bonusA;
                           const ptsB = (winner && winner === m.b ? basePts : 0) + bonusB;
                           const rowClass = winner ? "winner-row" : "";
@@ -2442,7 +2812,7 @@ export default function App() {
                   <div className="text-xs text-white/60">Jackpot actuel</div>
                   <div className="mt-1 text-2xl font-extrabold">{formatEUR(jackpotEUR)}</div>
                   <div className="mt-2 text-xs text-white/60">
-                    +{formatEUR(MONEY.jackpotPerPlayerEUR)} / joueur / soirée • +{formatEUR(MONEY.rebuyEUR)} / re-buy
+                    +{formatEUR(effectiveRules.jackpotPerPlayerEUR)} / joueur / soirée • +{formatEUR(effectiveRules.rebuyEUR)} / re-buy
                   </div>
                 </div>
 
@@ -2684,7 +3054,7 @@ export default function App() {
                   .slice()
                   .sort((a: Soiree, b: Soiree) => b.number - a.number)
                   .map((s: Soiree) => {
-                    const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason);
+                    const { pts, wins } = computePointsFromMatches(s.matches, s.rebuys, s.number, currentSeason, effectiveRules);
                     const rows = currentSeason.players.map((p: string) => ({ name: p, pts: pts.get(p) ?? 0, wins: wins.get(p) ?? 0 }));
                     rows.sort((a: { name: string; pts: number; wins: number }, b: { name: string; pts: number; wins: number }) =>
                       b.pts - a.pts || b.wins - a.wins || a.name.localeCompare(b.name)
@@ -2720,7 +3090,7 @@ export default function App() {
                         <div className="mt-2 flex flex-wrap gap-2">
                           <Pill>
                             Jackpot +
-                            {formatEUR((s.pools.A.length + s.pools.B.length) * MONEY.jackpotPerPlayerEUR + s.rebuys.length * MONEY.rebuyEUR)}
+                            {formatEUR((s.pools.A.length + s.pools.B.length) * effectiveRules.jackpotPerPlayerEUR + s.rebuys.length * effectiveRules.rebuyEUR)}
                           </Pill>
                           <Pill>Matchs: {s.matches.length}</Pill>
                         </div>
@@ -2798,7 +3168,9 @@ export default function App() {
                         if (!buyerN || !winnerN) return "";
 
                         if (currentSoiree.number <= 2) {
-                          return winnerN === buyerN ? "✅ Le buyer gagne +2 pts" : "❌ Buyer perd → 0 pt pour tous";
+                          return winnerN === buyerN
+                            ? `✅ Le buyer gagne +${effectiveRules.rebuyWinPointsS1S2} pts`
+                            : "❌ Buyer perd → 0 pt pour tous";
                         }
 
                         let doneBefore = 0;
@@ -2812,7 +3184,7 @@ export default function App() {
                           .slice(0, idx)
                           .filter((x: RebuyMatch) => normName(x.buyer) === buyerN && normName(x.winner)).length;
 
-                        const winPts = doneBefore === 0 ? 2 : 1;
+                        const winPts = doneBefore === 0 ? effectiveRules.rebuyFirstWinPointsS3Plus : effectiveRules.rebuyNextWinPointsS3Plus;
                         return winnerN === buyerN
                           ? `✅ Le buyer gagne +${winPts} pt${winPts > 1 ? "s" : ""}`
                           : "❌ Buyer perd → 0 pt pour tous";
@@ -2885,7 +3257,7 @@ export default function App() {
                           </div>
 
                           {info && <div className="mt-3 text-sm text-white/70">{info}</div>}
-                          <div className="mt-2 text-xs text-white/60">Impact cagnotte : +{formatEUR(MONEY.rebuyEUR)} (automatique)</div>
+                          <div className="mt-2 text-xs text-white/60">Impact cagnotte : +{formatEUR(effectiveRules.rebuyEUR)} (automatique)</div>
                         </div>
                       );
                     })}
@@ -2899,10 +3271,10 @@ export default function App() {
                 <div className="text-sm text-white/70 space-y-2">
                   <div>• Match sec : 301 • 10 tours max</div>
                   <div>• Seul le buyer peut marquer des points :</div>
-                  <div className="ml-3">— Soirées 1 & 2 : s’il gagne : +2 pts (ancien système)</div>
+                  <div className="ml-3">— Soirées 1 & 2 : s’il gagne : +{effectiveRules.rebuyWinPointsS1S2} pts</div>
                   <div className="ml-3">— À partir de la soirée 3 :</div>
-                  <div className="ml-6">• 1er re-buy de la saison gagné : +2 pts</div>
-                  <div className="ml-6">• re-buys suivants gagnés : +1 pt</div>
+                  <div className="ml-6">• 1er re-buy de la saison gagné : +{effectiveRules.rebuyFirstWinPointsS3Plus} pts</div>
+                  <div className="ml-6">• re-buys suivants gagnés : +{effectiveRules.rebuyNextWinPointsS3Plus} pt</div>
                   <div className="ml-3">— s’il perd : 0 pt pour tous</div>
                   <div className="mt-2 text-xs text-white/60">⚠️ Le re-buy ne qualifie jamais pour les phases finales.</div>
                 </div>
@@ -3410,6 +3782,46 @@ export default function App() {
           </Section>
         )}
 
+        {tab === "ARBITRAGE" && (
+          <Section title={`Mode Arbitrage — Soirée ${currentSoiree.number}`} right={<Pill>Officiel</Pill>}>
+            <div className="space-y-3">
+              {currentSoiree.matches
+                .slice()
+                .sort((a: CoreMatch, b: CoreMatch) => a.order - b.order)
+                .map((m: CoreMatch) => {
+                  const status = getMatchStatus(m);
+                  return (
+                    <div key={m.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <Pill>{m.phase}</Pill>
+                          <span className="text-xs text-white/60">Match #{m.order}</span>
+                          <Pill color={status === "VALIDATED" ? "#22c55e" : status === "CONTESTED" ? "#ef4444" : "#eab308"}>
+                            {status}
+                          </Pill>
+                        </div>
+                        <div className="text-sm font-semibold">
+                          {m.a || "—"} vs {m.b || "—"} {m.winner ? <span className="text-white/60">→ {m.winner}</span> : null}
+                        </div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button variant="ghost" onClick={() => setMatchStatus(m.id, "PENDING")}>
+                          En attente
+                        </Button>
+                        <Button variant="ghost" onClick={() => setMatchStatus(m.id, "VALIDATED")}>
+                          Valider
+                        </Button>
+                        <Button variant="danger" onClick={() => setMatchStatus(m.id, "CONTESTED")}>
+                          Contester
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </Section>
+        )}
+
         {tab === "SAISONS" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Section title="Saisons">
@@ -3474,7 +3886,7 @@ export default function App() {
         )}
 
         {tab === "PARAMS" && (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <Section title="Joueurs (saison en cours)">
               <div className="text-sm text-white/70 mb-3">
                 Ajoute tes joueurs ici. Les noms servent partout (matchs, menus, stats). Garde des noms stables (accents inclus).
@@ -3578,6 +3990,233 @@ export default function App() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </Section>
+
+            <Section title="Système">
+              <div className="space-y-3 text-sm text-white/70">
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Sauvegardes intelligentes</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button variant="ghost" onClick={() => createSnapshot("Manuel")}>
+                      Snapshot manuel
+                    </Button>
+                    <Button variant="ghost" onClick={() => undoLastAction()}>
+                      Undo
+                    </Button>
+                    <Button variant="ghost" onClick={() => redoLastAction()}>
+                      Redo
+                    </Button>
+                  </div>
+                  <div className="mt-2 space-y-1">
+                    {snapshots.slice(0, 4).map((snap) => (
+                      <div key={snap.id} className="flex items-center justify-between rounded-lg bg-black/30 px-2 py-1">
+                        <span className="text-xs">
+                          {snap.label} • {new Date(snap.ts).toLocaleString("fr-FR")}
+                        </span>
+                        <Button variant="ghost" onClick={() => restoreSnapshot(snap.id)}>
+                          Restaurer
+                        </Button>
+                      </div>
+                    ))}
+                    {snapshots.length === 0 && <div className="text-xs text-white/50">Aucun snapshot.</div>}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Règles personnalisables</div>
+                  <div className="mt-2">
+                    <Select
+                      value={state.system.rulesProfile}
+                      onChange={(v) =>
+                        updateSystem((system) => ({
+                          ...system,
+                          rulesProfile: (v === "STANDARD" || v === "FUN" || v === "CUSTOM" ? v : "STANDARD") as RulesProfile,
+                        }))
+                      }
+                      options={["STANDARD", "FUN", "CUSTOM"]}
+                    />
+                  </div>
+                  {state.system.rulesProfile === "CUSTOM" && (
+                    <div className="mt-2 grid grid-cols-2 gap-2">
+                      <label className="text-xs">
+                        Pts victoire
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          value={state.system.customRules.winPoints}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: { ...system.customRules, winPoints: clampInt(Number(e.target.value), 0, 20) },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Pts petite finale
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          value={state.system.customRules.smallFinalPoints}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: { ...system.customRules, smallFinalPoints: clampInt(Number(e.target.value), 0, 20) },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Bonus checkout
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          value={state.system.customRules.checkoutBonusPoints}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: {
+                                ...system.customRules,
+                                checkoutBonusPoints: clampInt(Number(e.target.value), 0, 10),
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Rebuy (€)
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          step="0.1"
+                          value={state.system.customRules.rebuyEUR}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: { ...system.customRules, rebuyEUR: Math.max(0, Number(e.target.value)) },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Rebuy S1-S2 (pts)
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          value={state.system.customRules.rebuyWinPointsS1S2}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: {
+                                ...system.customRules,
+                                rebuyWinPointsS1S2: clampInt(Number(e.target.value), 0, 20),
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        1er rebuy S3+ (pts)
+                        <input
+                          className="mt-1 w-full rounded-lg border border-white/10 bg-black/40 px-2 py-1 text-white"
+                          type="number"
+                          min={0}
+                          value={state.system.customRules.rebuyFirstWinPointsS3Plus}
+                          onChange={(e) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: {
+                                ...system.customRules,
+                                rebuyFirstWinPointsS3Plus: clampInt(Number(e.target.value), 0, 20),
+                              },
+                            }))
+                          }
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Formats poules
+                        <Select
+                          value={String(state.system.customRules.defaultPoolFormat)}
+                          onChange={(v) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: { ...system.customRules, defaultPoolFormat: Number(v) === 501 ? 501 : 301 },
+                            }))
+                          }
+                          options={["301", "501"]}
+                        />
+                      </label>
+                      <label className="text-xs">
+                        Format finale
+                        <Select
+                          value={String(state.system.customRules.defaultFinalFormat)}
+                          onChange={(v) =>
+                            updateSystem((system) => ({
+                              ...system,
+                              customRules: { ...system.customRules, defaultFinalFormat: Number(v) === 301 ? 301 : 501 },
+                            }))
+                          }
+                          options={["301", "501"]}
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Qualité des données</div>
+                  <div className="mt-2 space-y-1">
+                    {diagnostics.length === 0 && <div className="text-xs text-emerald-300">Aucune incohérence détectée.</div>}
+                    {diagnostics.slice(0, 8).map((issue, idx) => (
+                      <div key={`${idx}-${issue}`} className="text-xs text-orange-300">
+                        • {issue}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Partage simplifié</div>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button variant="ghost" onClick={() => exportSeasonSummaryText()}>
+                      Export résumé (.txt)
+                    </Button>
+                    <Button variant="ghost" onClick={() => exportSeasonSummaryPDF()}>
+                      Export résumé (PDF)
+                    </Button>
+                    <Button variant="ghost" onClick={() => generateReadOnlyLink()}>
+                      Lien lecture seule
+                    </Button>
+                  </div>
+                  {readOnlyLink && (
+                    <textarea
+                      className="mt-2 w-full rounded-xl border border-white/10 bg-black/40 p-2 text-xs text-white outline-none"
+                      rows={3}
+                      value={readOnlyLink}
+                      readOnly
+                    />
+                  )}
+                </div>
+
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60">Audit & journal</div>
+                  <div className="mt-2 space-y-1">
+                    {state.system.audit.slice(0, 8).map((a) => (
+                      <div key={a.id} className="text-xs">
+                        <span className="text-white/50">{new Date(a.ts).toLocaleString("fr-FR")} • </span>
+                        <span>{a.action}</span>
+                        {a.details ? <span className="text-white/60"> ({a.details})</span> : null}
+                      </div>
+                    ))}
+                    {state.system.audit.length === 0 && <div className="text-xs text-white/50">Aucun événement.</div>}
+                  </div>
+                </div>
               </div>
             </Section>
 
@@ -3686,7 +4325,7 @@ export default function App() {
                 <div className="mt-3 rounded-xl border border-white/10 bg-black/30 p-3">
                   <div className="text-xs text-white/60">Règles financières affichées</div>
                   <div className="mt-1">
-                    Entrée : {formatEUR(MONEY.entryFeeEUR)} • Jackpot: +{formatEUR(MONEY.jackpotPerPlayerEUR)}/joueur/soirée • Rebuy: +{formatEUR(MONEY.rebuyEUR)}
+                    Entrée : {formatEUR(MONEY.entryFeeEUR)} • Jackpot: +{formatEUR(effectiveRules.jackpotPerPlayerEUR)}/joueur/soirée • Rebuy: +{formatEUR(effectiveRules.rebuyEUR)}
                   </div>
                   <div className="mt-1">
                     Podium: {formatEUR(MONEY.podiumEUR.first)} / {formatEUR(MONEY.podiumEUR.second)} / {formatEUR(MONEY.podiumEUR.third)}
