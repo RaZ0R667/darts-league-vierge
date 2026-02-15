@@ -816,6 +816,8 @@ export default function App() {
   const [newSeasonName, setNewSeasonName] = useState("");
   const [copyPlayersForNewSeason, setCopyPlayersForNewSeason] = useState(true);
   const [funPlayerInput, setFunPlayerInput] = useState("");
+  const [funLiveEnabled, setFunLiveEnabled] = useState(false);
+  const [funLiveIndex, setFunLiveIndex] = useState(0);
   const currentSeasons: Season[] = state.seasons;
   const [selectedSoireeNumber, setSelectedSoireeNumber] = useState<number>(() => {
     const max = Math.max(...currentSeasons[0].soirees.map((s: Soiree) => s.number));
@@ -973,6 +975,26 @@ export default function App() {
     if (!state.funMode.moneyEnabled) return 0;
     return state.funMode.players.length * state.funMode.moneyPerPlayer;
   }, [state.funMode.moneyEnabled, state.funMode.players.length, state.funMode.moneyPerPlayer]);
+
+  const funLiveMatches = useMemo(() => {
+    const pool = state.funMode.matches
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map((m) => ({ ...m, _src: "POOL" as const }));
+    const finals = state.funMode.finals
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map((m) => ({ ...m, _src: "FINAL" as const }));
+    return [...pool, ...finals];
+  }, [state.funMode.matches, state.funMode.finals]);
+
+  const currentLiveMatch = funLiveMatches[funLiveIndex];
+
+  useEffect(() => {
+    if (funLiveIndex > Math.max(0, funLiveMatches.length - 1)) {
+      setFunLiveIndex(Math.max(0, funLiveMatches.length - 1));
+    }
+  }, [funLiveIndex, funLiveMatches.length]);
 
   const tvTabs: Array<"SOIREE" | "CLASSEMENT" | "H2H"> = ["SOIREE", "CLASSEMENT", "H2H"];
   const tvLabels: Record<string, string> = {
@@ -1141,6 +1163,20 @@ export default function App() {
       });
       return { ...fun, positionRounds };
     });
+  }
+
+  function setLiveWinner(matchId: string, source: "POOL" | "FINAL", winner: string) {
+    if (source === "POOL") {
+      setFunMatchWinner(matchId, winner);
+    } else {
+      setFunFinalWinner(matchId, winner);
+    }
+  }
+
+  function goToNextPendingLiveMatch() {
+    if (!funLiveMatches.length) return;
+    const idx = funLiveMatches.findIndex((m) => !normName(m.winner) && m.a && m.b);
+    if (idx >= 0) setFunLiveIndex(idx);
   }
 
   function updateFinancePayment(player: string, paid: boolean) {
@@ -2892,6 +2928,82 @@ export default function App() {
         {tab === "FUN" && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-2 space-y-4">
+              <Section
+                title="Mode Live Operateur"
+                right={
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant={funLiveEnabled ? "primary" : "ghost"} onClick={() => setFunLiveEnabled((v) => !v)}>
+                      {funLiveEnabled ? "Quitter Live" : "Entrer Live"}
+                    </Button>
+                    <Button variant="ghost" onClick={() => goToNextPendingLiveMatch()} disabled={!funLiveMatches.length}>
+                      Prochain non joue
+                    </Button>
+                  </div>
+                }
+              >
+                {!funLiveEnabled ? (
+                  <div className="text-sm text-white/70">
+                    Active ce mode pour piloter les matchs en direct (mobile first) avec validation rapide.
+                  </div>
+                ) : !currentLiveMatch ? (
+                  <div className="text-sm text-white/70">Aucun match disponible.</div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+                      <div className="flex items-center justify-between text-xs text-white/60">
+                        <span>
+                          Match {funLiveIndex + 1} / {funLiveMatches.length}
+                        </span>
+                        <Pill>{currentLiveMatch.phase}</Pill>
+                      </div>
+                      <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <button
+                          className={`rounded-xl border px-3 py-3 text-left ${
+                            normName(currentLiveMatch.winner) === currentLiveMatch.a
+                              ? "border-emerald-400 bg-emerald-500/15"
+                              : "border-white/10 bg-black/20 hover:bg-black/35"
+                          }`}
+                          onClick={() => setLiveWinner(currentLiveMatch.id, currentLiveMatch._src, currentLiveMatch.a)}
+                          disabled={!currentLiveMatch.a}
+                        >
+                          <div className="text-xs text-white/60">Vainqueur A</div>
+                          <div className="font-semibold">{currentLiveMatch.a || "-"}</div>
+                        </button>
+                        <button
+                          className={`rounded-xl border px-3 py-3 text-left ${
+                            normName(currentLiveMatch.winner) === currentLiveMatch.b
+                              ? "border-emerald-400 bg-emerald-500/15"
+                              : "border-white/10 bg-black/20 hover:bg-black/35"
+                          }`}
+                          onClick={() => setLiveWinner(currentLiveMatch.id, currentLiveMatch._src, currentLiveMatch.b)}
+                          disabled={!currentLiveMatch.b}
+                        >
+                          <div className="text-xs text-white/60">Vainqueur B</div>
+                          <div className="font-semibold">{currentLiveMatch.b || "-"}</div>
+                        </button>
+                      </div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button variant="ghost" onClick={() => setLiveWinner(currentLiveMatch.id, currentLiveMatch._src, "")}>
+                          Effacer resultat
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button variant="ghost" onClick={() => setFunLiveIndex((i) => Math.max(0, i - 1))} disabled={funLiveIndex <= 0}>
+                        Match precedent
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => setFunLiveIndex((i) => Math.min(funLiveMatches.length - 1, i + 1))}
+                        disabled={funLiveIndex >= funLiveMatches.length - 1}
+                      >
+                        Match suivant
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </Section>
+
               <Section
                 title="Mode Fun — Tournoi Soiree Unique"
                 right={
