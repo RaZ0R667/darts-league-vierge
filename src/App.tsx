@@ -206,7 +206,7 @@ function loadSnapshots(): SnapshotEntry[] {
         label: normName(x?.label) || "Snapshot",
         state: sanitizeState(x?.state),
       }))
-      .sort((a, b) => b.ts - a.ts)
+      .sort((a: SnapshotEntry, b: SnapshotEntry) => b.ts - a.ts)
       .slice(0, MAX_SNAPSHOTS);
   } catch {
     return [];
@@ -781,7 +781,7 @@ function sanitizeState(raw: any): AppState {
             action: normName(x?.action) || "Action",
             details: normName(x?.details) || undefined,
           }))
-          .sort((a, b) => b.ts - a.ts)
+          .sort((a: AuditEntry, b: AuditEntry) => b.ts - a.ts)
           .slice(0, 300)
       : [];
 
@@ -1235,11 +1235,12 @@ export default function App() {
 
   function setFunMatchWinner(matchId: string, winner: string) {
     updateFunMode((fun) => {
-      const matches = fun.matches.map((m) => {
+      const matches: CoreMatch[] = fun.matches.map((m) => {
         if (m.id !== matchId) return m;
         const w = normName(winner);
         const valid = w === m.a || w === m.b;
-        return { ...m, winner: valid ? w : "", status: valid ? "VALIDATED" : "PENDING", checkout100: false };
+        const status: MatchStatus = valid ? "VALIDATED" : "PENDING";
+        return { ...m, winner: valid ? w : "", status, checkout100: false };
       });
       return { ...fun, matches };
     });
@@ -1426,16 +1427,17 @@ export default function App() {
 
   function setMatchWinner(matchId: string, winner: string) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees: Soiree[] = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m) => {
+        const matches: CoreMatch[] = s.matches.map((m) => {
           if (m.id !== matchId) return m;
           const w = normName(winner);
           const valid = w && (w === normName(m.a) || w === normName(m.b));
+          const status: MatchStatus = valid ? "VALIDATED" : "PENDING";
           return {
             ...m,
             winner: valid ? w : "",
-            status: valid ? "VALIDATED" : "PENDING",
+            status,
             checkout100: valid ? m.checkout100 : false,
           };
         });
@@ -1447,7 +1449,7 @@ export default function App() {
 
   function setMatchStatus(matchId: string, status: MatchStatus) {
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees: Soiree[] = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
         return {
           ...s,
@@ -1506,16 +1508,18 @@ export default function App() {
 
         const demisSorted = s.matches.filter((x) => x.phase === "DEMI").sort((x, y) => x.order - y.order);
 
-        const matches = s.matches.map((m) => {
+        const matches: CoreMatch[] = s.matches.map((m) => {
           if (m.phase !== "DEMI") return m;
           const demiIndex = demisSorted.findIndex((x) => x.id === m.id);
           if (demiIndex === 0) {
             const winner = m.winner && (m.winner === A1 || m.winner === B2) ? m.winner : "";
-            return { ...m, a: A1, b: B2, winner, status: winner ? "VALIDATED" : "PENDING" };
+            const status: MatchStatus = winner ? "VALIDATED" : "PENDING";
+            return { ...m, a: A1, b: B2, winner, status };
           }
           if (demiIndex === 1) {
             const winner = m.winner && (m.winner === B1 || m.winner === A2) ? m.winner : "";
-            return { ...m, a: B1, b: A2, winner, status: winner ? "VALIDATED" : "PENDING" };
+            const status: MatchStatus = winner ? "VALIDATED" : "PENDING";
+            return { ...m, a: B1, b: A2, winner, status };
           }
           return m;
         });
@@ -1540,20 +1544,22 @@ export default function App() {
     const l2 = w2 ? (w2 === d2.a ? d2.b : w2 === d2.b ? d2.a : "") : "";
 
     updateSeason((season) => {
-      const soirees = season.soirees.map((s) => {
+      const soirees: Soiree[] = season.soirees.map((s) => {
         if (s.number !== currentSoiree.number) return s;
-        const matches = s.matches.map((m) => {
+        const matches: CoreMatch[] = s.matches.map((m) => {
           if (m.phase === "FINAL") {
             const a = w1 && w2 ? w1 : "";
             const b = w1 && w2 ? w2 : "";
             const keepWinner = m.winner && (m.winner === a || m.winner === b) ? m.winner : "";
-            return { ...m, a, b, winner: keepWinner, status: keepWinner ? "VALIDATED" : "PENDING" };
+            const status: MatchStatus = keepWinner ? "VALIDATED" : "PENDING";
+            return { ...m, a, b, winner: keepWinner, status };
           }
           if (m.phase === "PFINAL") {
             const a = l1 && l2 ? l1 : "";
             const b = l1 && l2 ? l2 : "";
             const keepWinner = m.winner && (m.winner === a || m.winner === b) ? m.winner : "";
-            return { ...m, a, b, winner: keepWinner, status: keepWinner ? "VALIDATED" : "PENDING" };
+            const status: MatchStatus = keepWinner ? "VALIDATED" : "PENDING";
+            return { ...m, a, b, winner: keepWinner, status };
           }
           return m;
         });
