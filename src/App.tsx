@@ -62,10 +62,16 @@ type Season = {
   soirees: Soiree[];
 };
 
+type FunModeState = {
+  players: string[];
+  matches: CoreMatch[];
+};
+
 type AppState = {
   version: number;
   seasons: Season[];
   activeSeasonId: string;
+  funMode: FunModeState;
 };
 
 const STORAGE_KEY = "darts_league_app_v2";
@@ -116,6 +122,38 @@ function shuffle<T>(arr: T[]) {
 
 function clampInt(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function hashString(s: string) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h << 5) - h + s.charCodeAt(i);
+    h |= 0;
+  }
+  return Math.abs(h);
+}
+
+function buildRoundRobinMatches(players: string[]): CoreMatch[] {
+  const pairs: Array<[string, string]> = [];
+  for (let i = 0; i < players.length; i++) {
+    for (let j = i + 1; j < players.length; j++) {
+      pairs.push([players[i], players[j]]);
+    }
+  }
+  return pairs.map(([a, b], idx) => ({
+    id: uid("funm"),
+    order: idx + 1,
+    phase: "POULE",
+    pool: null,
+    format: 301,
+    bo: "BO3",
+    maxTurns: 10,
+    a,
+    b,
+    winner: "",
+    checkout100: false,
+    checkoutBy: "",
+  }));
 }
 
 function poolMatchesFor4(players: string[], pool: "A" | "B"): CoreMatch[] {
@@ -442,6 +480,10 @@ function makeInitialState(): AppState {
     version: VERSION,
     seasons: [season],
     activeSeasonId: season.id,
+    funMode: {
+      players: [],
+      matches: [],
+    },
   };
 }
 
@@ -549,10 +591,33 @@ function sanitizeState(raw: any): AppState {
     const seasons = seasonsRaw.length ? seasonsRaw.map(sanitizeSeason) : [makeEmptySeason("Saison 1")];
     const activeSeasonId = normName(raw.activeSeasonId) || seasons[0].id;
 
+    const rawFunPlayers = uniq((raw.funMode?.players ?? []).map(normName)).filter(isNonEmptyString).slice(0, 8);
+    const rawFunMatches = Array.isArray(raw.funMode?.matches) ? raw.funMode.matches : [];
+    const funMatches: CoreMatch[] = rawFunMatches.map((m: any, idx: number) => ({
+      id: normName(m?.id) || uid("funm"),
+      order: clampInt(Number(m?.order ?? idx + 1), 1, 9999),
+      phase: "POULE",
+      pool: null,
+      format: Number(m?.format) === 501 ? 501 : 301,
+      bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as "BO1" | "BO3" | "BO5" | "SEC",
+      maxTurns: clampInt(Number(m?.maxTurns ?? 10), 1, 50),
+      a: normName(m?.a),
+      b: normName(m?.b),
+      winner: normName(m?.winner),
+      checkout100: Boolean(m?.checkout100),
+      checkoutBy: m?.checkoutBy === "A" || m?.checkoutBy === "B" ? m.checkoutBy : "",
+    }));
+
     return {
       version: v || VERSION,
       seasons,
       activeSeasonId,
+      funMode: {
+        players: rawFunPlayers,
+        matches: funMatches
+          .filter((m) => m.a && m.b && rawFunPlayers.includes(m.a) && rawFunPlayers.includes(m.b))
+          .sort((a, b) => a.order - b.order),
+      },
     };
   } catch {
     return fallback;
@@ -696,7 +761,7 @@ export default function App() {
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [state, setState] = useState<AppState>(() => loadState());
   const [tab, setTab] = useState<
-    "SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "H2H" | "FINANCES" | "PARAMS" | "SAISONS"
+    "SOIREE" | "CLASSEMENT" | "HISTO" | "REBUY" | "FUN" | "H2H" | "FINANCES" | "PARAMS" | "SAISONS"
   >("SOIREE");
   const [tvMode, setTvMode] = useState(false);
   const [, setTvIndex] = useState(0);
@@ -721,6 +786,7 @@ export default function App() {
   const [editingPlayerName, setEditingPlayerName] = useState("");
   const [newSeasonName, setNewSeasonName] = useState("");
   const [copyPlayersForNewSeason, setCopyPlayersForNewSeason] = useState(true);
+  const [funPlayerInput, setFunPlayerInput] = useState("");
   const currentSeasons: Season[] = state.seasons;
   const [selectedSoireeNumber, setSelectedSoireeNumber] = useState<number>(() => {
     const max = Math.max(...currentSeasons[0].soirees.map((s: Soiree) => s.number));
@@ -775,6 +841,12 @@ export default function App() {
     return map;
   }, [currentSeason.players]);
 
+  const getPlayerColor = (name: string) => {
+    const norm = normName(name);
+    if (!norm) return "#ffffff33";
+    return playerColors.get(norm) ?? PALETTE[hashString(norm) % PALETTE.length];
+  };
+
   const currentSoiree = useMemo(() => {
     return currentSeason.soirees.find((s: Soiree) => s.number === selectedSoireeNumber) ?? currentSeason.soirees[0];
   }, [currentSeason.soirees, selectedSoireeNumber]);
@@ -809,6 +881,33 @@ export default function App() {
     return [...currentSeason.soirees].map((s: Soiree) => s.number).sort((a: number, b: number) => a - b);
   }, [currentSeason.soirees]);
 
+  const funStandings = useMemo(() => {
+    const wins = new Map<string, number>();
+    const played = new Map<string, number>();
+    state.funMode.players.forEach((p) => {
+      wins.set(p, 0);
+      played.set(p, 0);
+    });
+
+    for (const m of state.funMode.matches) {
+      const a = normName(m.a);
+      const b = normName(m.b);
+      const w = normName(m.winner);
+      if (!a || !b) continue;
+      played.set(a, (played.get(a) ?? 0) + 1);
+      played.set(b, (played.get(b) ?? 0) + 1);
+      if (w && (w === a || w === b)) wins.set(w, (wins.get(w) ?? 0) + 1);
+    }
+
+    const rows = state.funMode.players.map((p) => ({
+      name: p,
+      wins: wins.get(p) ?? 0,
+      played: played.get(p) ?? 0,
+    }));
+    rows.sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name));
+    return rows;
+  }, [state.funMode.players, state.funMode.matches]);
+
   const tvTabs: Array<"SOIREE" | "CLASSEMENT" | "H2H"> = ["SOIREE", "CLASSEMENT", "H2H"];
   const tvLabels: Record<string, string> = {
     SOIREE: "Soirée",
@@ -839,6 +938,52 @@ export default function App() {
       const seasons = prev.seasons.map((s) => (s.id === prev.activeSeasonId ? mutator(s) : s));
       return { ...prev, seasons };
     });
+  }
+
+  function updateFunMode(mutator: (funMode: FunModeState) => FunModeState) {
+    setState((prev) => ({ ...prev, funMode: mutator(prev.funMode) }));
+  }
+
+  function addFunPlayer() {
+    const name = normName(funPlayerInput);
+    if (!name) return;
+    updateFunMode((fun) => {
+      if (fun.players.includes(name) || fun.players.length >= 8) return fun;
+      return { ...fun, players: [...fun.players, name], matches: [] };
+    });
+    setFunPlayerInput("");
+  }
+
+  function removeFunPlayer(name: string) {
+    updateFunMode((fun) => ({
+      ...fun,
+      players: fun.players.filter((p) => p !== name),
+      matches: [],
+    }));
+  }
+
+  function generateFunSoiree() {
+    updateFunMode((fun) => {
+      const players = fun.players.slice(0, 8);
+      if (players.length < 2) return fun;
+      return { ...fun, matches: buildRoundRobinMatches(players) };
+    });
+  }
+
+  function setFunMatchWinner(matchId: string, winner: string) {
+    updateFunMode((fun) => {
+      const matches = fun.matches.map((m) => {
+        if (m.id !== matchId) return m;
+        const w = normName(winner);
+        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" };
+      });
+      return { ...fun, matches };
+    });
+  }
+
+  function resetFunMode() {
+    updateFunMode(() => ({ players: [], matches: [] }));
+    setFunPlayerInput("");
   }
 
   function updateFinancePayment(player: string, paid: boolean) {
@@ -1594,6 +1739,7 @@ export default function App() {
               ["CLASSEMENT", "Classement"],
               ["HISTO", "Historique"],
               ["REBUY", "Re-buy"],
+              ["FUN", "Mode Fun"],
               ["H2H", "Confrontations"],
               ["SAISONS", "Saisons"],
               ["FINANCES", "Finances"],
@@ -1620,6 +1766,7 @@ export default function App() {
                 ["CLASSEMENT", "Classement"],
                 ["HISTO", "Historique"],
                 ["REBUY", "Re-buy"],
+                ["FUN", "Fun"],
                 ["H2H", "H2H"],
                 ["SAISONS", "Saisons"],
                 ["FINANCES", "Finances"],
@@ -1639,7 +1786,7 @@ export default function App() {
           </div>
         </div>
 
-        {tab !== "PARAMS" && tab !== "SAISONS" && (
+        {tab !== "PARAMS" && tab !== "SAISONS" && tab !== "FUN" && (
           <div className="mb-6 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center sm:justify-between tv-hide">
             <div className="text-sm text-white/70">Soirée sélectionnée</div>
             <div className="w-full sm:w-56">
@@ -2578,6 +2725,114 @@ export default function App() {
                   <div className="mt-2">
                     Jackpot actuel : <span className="font-extrabold text-white">{formatEUR(jackpotEUR)}</span>
                   </div>
+                </div>
+              </Section>
+            </div>
+          </div>
+        )}
+
+        {tab === "FUN" && (
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <div className="lg:col-span-2 space-y-4">
+              <Section
+                title="Mode Fun — Soiree Unique"
+                right={
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="ghost" onClick={() => generateFunSoiree()} disabled={state.funMode.players.length < 2}>
+                      Generer les matchs
+                    </Button>
+                    <Button variant="danger" onClick={() => resetFunMode()}>
+                      Reinitialiser
+                    </Button>
+                  </div>
+                }
+              >
+                <div className="mb-3 rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="text-xs text-white/60 mb-2">Joueurs (2 a 8)</div>
+                  <div className="flex flex-col gap-2 sm:flex-row">
+                    <input
+                      value={funPlayerInput}
+                      onChange={(e) => setFunPlayerInput(e.target.value)}
+                      className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
+                      placeholder="Ajouter un joueur..."
+                    />
+                    <Button onClick={() => addFunPlayer()} disabled={!funPlayerInput.trim() || state.funMode.players.length >= 8}>
+                      Ajouter
+                    </Button>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {state.funMode.players.map((p) => (
+                      <button
+                        key={p}
+                        onClick={() => removeFunPlayer(p)}
+                        className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs hover:bg-white/15"
+                        title="Retirer ce joueur"
+                      >
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: getPlayerColor(p) }} />
+                        <span>{p}</span>
+                        <span className="text-white/60">x</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {state.funMode.matches.length === 0 ? (
+                  <div className="text-sm text-white/70">Ajoute au moins 2 joueurs puis clique sur "Generer les matchs".</div>
+                ) : (
+                  <div className="space-y-2">
+                    {state.funMode.matches
+                      .slice()
+                      .sort((a, b) => a.order - b.order)
+                      .map((m) => (
+                        <div key={m.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                          <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                            <div className="flex items-center gap-2 text-sm">
+                              <span className="text-white/60">#{m.order}</span>
+                              <span className="font-semibold">{m.a}</span>
+                              <span className="text-white/50">vs</span>
+                              <span className="font-semibold">{m.b}</span>
+                            </div>
+                            <div className="w-full md:w-56">
+                              <Select
+                                value={normName(m.winner)}
+                                onChange={(v) => setFunMatchWinner(m.id, v)}
+                                options={[m.a, m.b]}
+                                placeholder="Vainqueur..."
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </Section>
+            </div>
+
+            <div className="space-y-4">
+              <Section title="Classement Fun">
+                <div className="space-y-2">
+                  {funStandings.map((r, idx) => (
+                    <div key={r.name} className="flex items-center justify-between rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-white/60 w-6">{idx + 1}.</span>
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: getPlayerColor(r.name) }} />
+                        <span className="font-semibold">{r.name}</span>
+                      </div>
+                      <div className="text-xs text-white/70">
+                        <span className="font-bold text-white">{r.wins}</span> V / {r.played} M
+                      </div>
+                    </div>
+                  ))}
+                  {funStandings.length === 0 && <div className="text-sm text-white/70">Aucun joueur.</div>}
+                </div>
+              </Section>
+
+              <Section title="Regles Fun">
+                <div className="text-sm text-white/70 space-y-2">
+                  <div>• Mode independant des saisons.</div>
+                  <div>• Maximum 8 joueurs.</div>
+                  <div>• Tous les joueurs se rencontrent une fois.</div>
+                  <div>• Une victoire compte pour 1 point.</div>
                 </div>
               </Section>
             </div>
