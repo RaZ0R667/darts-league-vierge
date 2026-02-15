@@ -64,7 +64,12 @@ type Season = {
 
 type FunModeState = {
   players: string[];
+  format: 301 | 501;
+  moneyEnabled: boolean;
+  moneyPerPlayer: number;
   matches: CoreMatch[];
+  finals: CoreMatch[];
+  positionRounds: Array<{ id: string; positions: string[] }>;
 };
 
 type AppState = {
@@ -133,7 +138,7 @@ function hashString(s: string) {
   return Math.abs(h);
 }
 
-function buildRoundRobinMatches(players: string[]): CoreMatch[] {
+function buildRoundRobinMatches(players: string[], format: 301 | 501): CoreMatch[] {
   const pairs: Array<[string, string]> = [];
   for (let i = 0; i < players.length; i++) {
     for (let j = i + 1; j < players.length; j++) {
@@ -145,7 +150,7 @@ function buildRoundRobinMatches(players: string[]): CoreMatch[] {
     order: idx + 1,
     phase: "POULE",
     pool: null,
-    format: 301,
+    format,
     bo: "BO3",
     maxTurns: 10,
     a,
@@ -474,16 +479,25 @@ function makeEmptySeason(name = "Saison 1"): Season {
   };
 }
 
+function makeEmptyFunMode(): FunModeState {
+  return {
+    players: [],
+    format: 301,
+    moneyEnabled: false,
+    moneyPerPlayer: 0,
+    matches: [],
+    finals: [],
+    positionRounds: [],
+  };
+}
+
 function makeInitialState(): AppState {
   const season = makeEmptySeason("Saison 1");
   return {
     version: VERSION,
     seasons: [season],
     activeSeasonId: season.id,
-    funMode: {
-      players: [],
-      matches: [],
-    },
+    funMode: makeEmptyFunMode(),
   };
 }
 
@@ -593,10 +607,12 @@ function sanitizeState(raw: any): AppState {
 
     const rawFunPlayers = uniq((raw.funMode?.players ?? []).map(normName)).filter(isNonEmptyString).slice(0, 8);
     const rawFunMatches = Array.isArray(raw.funMode?.matches) ? raw.funMode.matches : [];
-    const funMatches: CoreMatch[] = rawFunMatches.map((m: any, idx: number) => ({
+    const rawFunFinals = Array.isArray(raw.funMode?.finals) ? raw.funMode.finals : [];
+    const rawPositionRounds = Array.isArray(raw.funMode?.positionRounds) ? raw.funMode.positionRounds : [];
+    const sanitizeFunMatch = (m: any, idx: number): CoreMatch => ({
       id: normName(m?.id) || uid("funm"),
       order: clampInt(Number(m?.order ?? idx + 1), 1, 9999),
-      phase: "POULE",
+      phase: (["POULE", "DEMI", "PFINAL", "FINAL"].includes(m?.phase) ? m.phase : "POULE") as Phase,
       pool: null,
       format: Number(m?.format) === 501 ? 501 : 301,
       bo: (["BO1", "BO3", "BO5", "SEC"].includes(m?.bo) ? m.bo : "BO3") as "BO1" | "BO3" | "BO5" | "SEC",
@@ -606,6 +622,12 @@ function sanitizeState(raw: any): AppState {
       winner: normName(m?.winner),
       checkout100: Boolean(m?.checkout100),
       checkoutBy: m?.checkoutBy === "A" || m?.checkoutBy === "B" ? m.checkoutBy : "",
+    });
+    const funMatches: CoreMatch[] = rawFunMatches.map(sanitizeFunMatch);
+    const funFinals: CoreMatch[] = rawFunFinals.map(sanitizeFunMatch);
+    const funPositionRounds: Array<{ id: string; positions: string[] }> = rawPositionRounds.map((r: any, idx: number) => ({
+      id: normName(r?.id) || uid(`fpr_${idx + 1}`),
+      positions: Array.isArray(r?.positions) ? r.positions.map(normName).filter(isNonEmptyString) : [],
     }));
 
     return {
@@ -614,9 +636,16 @@ function sanitizeState(raw: any): AppState {
       activeSeasonId,
       funMode: {
         players: rawFunPlayers,
+        format: Number(raw.funMode?.format) === 501 ? 501 : 301,
+        moneyEnabled: Boolean(raw.funMode?.moneyEnabled),
+        moneyPerPlayer: Math.max(0, Number(raw.funMode?.moneyPerPlayer ?? 0)),
         matches: funMatches
-          .filter((m) => m.a && m.b && rawFunPlayers.includes(m.a) && rawFunPlayers.includes(m.b))
+          .filter((m) => m.phase === "POULE" && m.a && m.b && rawFunPlayers.includes(m.a) && rawFunPlayers.includes(m.b))
           .sort((a, b) => a.order - b.order),
+        finals: funFinals
+          .filter((m) => m.phase !== "POULE")
+          .sort((a, b) => a.order - b.order),
+        positionRounds: funPositionRounds,
       },
     };
   } catch {
@@ -884,9 +913,11 @@ export default function App() {
   const funStandings = useMemo(() => {
     const wins = new Map<string, number>();
     const played = new Map<string, number>();
+    const posPts = new Map<string, number>();
     state.funMode.players.forEach((p) => {
       wins.set(p, 0);
       played.set(p, 0);
+      posPts.set(p, 0);
     });
 
     for (const m of state.funMode.matches) {
@@ -899,14 +930,49 @@ export default function App() {
       if (w && (w === a || w === b)) wins.set(w, (wins.get(w) ?? 0) + 1);
     }
 
+    for (const round of state.funMode.positionRounds) {
+      const seen = new Set<string>();
+      round.positions.forEach((p, idx) => {
+        const name = normName(p);
+        if (!name || seen.has(name) || !state.funMode.players.includes(name)) return;
+        seen.add(name);
+        const points = Math.max(0, state.funMode.players.length - idx);
+        posPts.set(name, (posPts.get(name) ?? 0) + points);
+      });
+    }
+
     const rows = state.funMode.players.map((p) => ({
       name: p,
       wins: wins.get(p) ?? 0,
       played: played.get(p) ?? 0,
+      posPts: posPts.get(p) ?? 0,
+      total: (wins.get(p) ?? 0) * 3 + (posPts.get(p) ?? 0),
     }));
-    rows.sort((a, b) => b.wins - a.wins || a.name.localeCompare(b.name));
+    rows.sort((a, b) => b.total - a.total || b.wins - a.wins || a.name.localeCompare(b.name));
     return rows;
-  }, [state.funMode.players, state.funMode.matches]);
+  }, [state.funMode.players, state.funMode.matches, state.funMode.positionRounds]);
+
+  const funPodium = useMemo(() => {
+    const final = state.funMode.finals.find((m) => m.phase === "FINAL");
+    const pfinal = state.funMode.finals.find((m) => m.phase === "PFINAL");
+    const wFinal = normName(final?.winner ?? "");
+    const aFinal = normName(final?.a ?? "");
+    const bFinal = normName(final?.b ?? "");
+    const second = wFinal && (wFinal === aFinal || wFinal === bFinal) ? (wFinal === aFinal ? bFinal : aFinal) : "";
+    const third = normName(pfinal?.winner ?? "");
+    if (wFinal && second && third) return { first: wFinal, second, third, provisional: false as const };
+    return {
+      first: funStandings[0]?.name ?? "",
+      second: funStandings[1]?.name ?? "",
+      third: funStandings[2]?.name ?? "",
+      provisional: true as const,
+    };
+  }, [state.funMode.finals, funStandings]);
+
+  const funPotEUR = useMemo(() => {
+    if (!state.funMode.moneyEnabled) return 0;
+    return state.funMode.players.length * state.funMode.moneyPerPlayer;
+  }, [state.funMode.moneyEnabled, state.funMode.players.length, state.funMode.moneyPerPlayer]);
 
   const tvTabs: Array<"SOIREE" | "CLASSEMENT" | "H2H"> = ["SOIREE", "CLASSEMENT", "H2H"];
   const tvLabels: Record<string, string> = {
@@ -949,7 +1015,7 @@ export default function App() {
     if (!name) return;
     updateFunMode((fun) => {
       if (fun.players.includes(name) || fun.players.length >= 8) return fun;
-      return { ...fun, players: [...fun.players, name], matches: [] };
+      return { ...fun, players: [...fun.players, name], matches: [], finals: [], positionRounds: [] };
     });
     setFunPlayerInput("");
   }
@@ -959,6 +1025,8 @@ export default function App() {
       ...fun,
       players: fun.players.filter((p) => p !== name),
       matches: [],
+      finals: [],
+      positionRounds: [],
     }));
   }
 
@@ -966,7 +1034,12 @@ export default function App() {
     updateFunMode((fun) => {
       const players = fun.players.slice(0, 8);
       if (players.length < 2) return fun;
-      return { ...fun, matches: buildRoundRobinMatches(players) };
+      return {
+        ...fun,
+        matches: buildRoundRobinMatches(players, fun.format),
+        finals: [],
+        positionRounds: [],
+      };
     });
   }
 
@@ -982,8 +1055,92 @@ export default function App() {
   }
 
   function resetFunMode() {
-    updateFunMode(() => ({ players: [], matches: [] }));
+    updateFunMode(() => makeEmptyFunMode());
     setFunPlayerInput("");
+  }
+
+  function setFunFormat(format: 301 | 501) {
+    updateFunMode((fun) => ({
+      ...fun,
+      format,
+      matches: fun.matches.map((m) => ({ ...m, format })),
+      finals: fun.finals.map((m) => ({ ...m, format })),
+    }));
+  }
+
+  function generateFunFinals() {
+    updateFunMode((fun) => {
+      if (funStandings.length < 4) return fun;
+      const top4 = funStandings.slice(0, 4).map((r) => r.name);
+      const finals: CoreMatch[] = [
+        { id: uid("ff"), order: 1, phase: "DEMI", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[0], b: top4[3], winner: "", checkout100: false, checkoutBy: "" },
+        { id: uid("ff"), order: 2, phase: "DEMI", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: top4[1], b: top4[2], winner: "", checkout100: false, checkoutBy: "" },
+        { id: uid("ff"), order: 3, phase: "PFINAL", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
+        { id: uid("ff"), order: 4, phase: "FINAL", pool: null, format: fun.format, bo: "BO3", maxTurns: 10, a: "", b: "", winner: "", checkout100: false, checkoutBy: "" },
+      ];
+      return { ...fun, finals };
+    });
+  }
+
+  function setFunFinalWinner(matchId: string, winner: string) {
+    updateFunMode((fun) => {
+      const finals = fun.finals.map((m) => {
+        if (m.id !== matchId) return m;
+        const w = normName(winner);
+        return { ...m, winner: w === m.a || w === m.b ? w : "", checkout100: false, checkoutBy: "" as const };
+      });
+
+      const demis = finals.filter((m) => m.phase === "DEMI").sort((a, b) => a.order - b.order);
+      const final = finals.find((m) => m.phase === "FINAL");
+      const pfinal = finals.find((m) => m.phase === "PFINAL");
+      if (demis.length === 2 && final && pfinal) {
+        const d1 = demis[0];
+        const d2 = demis[1];
+        const w1 = normName(d1.winner);
+        const w2 = normName(d2.winner);
+        const l1 = w1 === d1.a ? d1.b : w1 === d1.b ? d1.a : "";
+        const l2 = w2 === d2.a ? d2.b : w2 === d2.b ? d2.a : "";
+        final.a = w1 && w2 ? w1 : "";
+        final.b = w1 && w2 ? w2 : "";
+        if (final.winner && final.winner !== final.a && final.winner !== final.b) final.winner = "";
+        pfinal.a = l1 && l2 ? l1 : "";
+        pfinal.b = l1 && l2 ? l2 : "";
+        if (pfinal.winner && pfinal.winner !== pfinal.a && pfinal.winner !== pfinal.b) pfinal.winner = "";
+      }
+      return { ...fun, finals: [...finals] };
+    });
+  }
+
+  function addFunPositionRound() {
+    updateFunMode((fun) => ({
+      ...fun,
+      positionRounds: [...fun.positionRounds, { id: uid("fpr"), positions: Array(fun.players.length).fill("") }],
+    }));
+  }
+
+  function deleteFunPositionRound(id: string) {
+    updateFunMode((fun) => ({
+      ...fun,
+      positionRounds: fun.positionRounds.filter((r) => r.id !== id),
+    }));
+  }
+
+  function setFunRoundPosition(roundId: string, index: number, player: string) {
+    updateFunMode((fun) => {
+      const selected = normName(player);
+      const positionRounds = fun.positionRounds.map((r) => {
+        if (r.id !== roundId) return r;
+        const positions = [...r.positions];
+        if (selected) {
+          for (let i = 0; i < positions.length; i++) {
+            if (i !== index && positions[i] === selected) positions[i] = "";
+          }
+        }
+        positions[index] = selected;
+        return { ...r, positions };
+      });
+      return { ...fun, positionRounds };
+    });
   }
 
   function updateFinancePayment(player: string, paid: boolean) {
@@ -2735,11 +2892,14 @@ export default function App() {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <div className="lg:col-span-2 space-y-4">
               <Section
-                title="Mode Fun — Soiree Unique"
+                title="Mode Fun — Tournoi Soiree Unique"
                 right={
                   <div className="flex flex-wrap gap-2">
                     <Button variant="ghost" onClick={() => generateFunSoiree()} disabled={state.funMode.players.length < 2}>
-                      Generer les matchs
+                      Generer ligue
+                    </Button>
+                    <Button variant="ghost" onClick={() => generateFunFinals()} disabled={funStandings.length < 4}>
+                      Generer top 4
                     </Button>
                     <Button variant="danger" onClick={() => resetFunMode()}>
                       Reinitialiser
@@ -2747,7 +2907,42 @@ export default function App() {
                   </div>
                 }
               >
-                <div className="mb-3 rounded-xl border border-white/10 bg-black/30 p-3">
+                <div className="mb-3 rounded-xl border border-white/10 bg-black/30 p-3 space-y-3">
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                    <div>
+                      <div className="text-xs text-white/60 mb-1">Format</div>
+                      <Select
+                        value={String(state.funMode.format)}
+                        onChange={(v) => setFunFormat(Number(v) === 501 ? 501 : 301)}
+                        options={["301", "501"]}
+                      />
+                    </div>
+                    <div>
+                      <div className="text-xs text-white/60 mb-1">Mode argent</div>
+                      <label className="inline-flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={state.funMode.moneyEnabled}
+                          onChange={(e) => updateFunMode((fun) => ({ ...fun, moneyEnabled: e.target.checked }))}
+                        />
+                        Activer
+                      </label>
+                    </div>
+                    <div>
+                      <div className="text-xs text-white/60 mb-1">Mise par joueur</div>
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        value={state.funMode.moneyPerPlayer}
+                        onChange={(e) =>
+                          updateFunMode((fun) => ({ ...fun, moneyPerPlayer: Math.max(0, Number(e.target.value) || 0) }))
+                        }
+                        className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
+                        disabled={!state.funMode.moneyEnabled}
+                      />
+                    </div>
+                  </div>
                   <div className="text-xs text-white/60 mb-2">Joueurs (2 a 8)</div>
                   <div className="flex flex-col gap-2 sm:flex-row">
                     <input
@@ -2774,12 +2969,18 @@ export default function App() {
                       </button>
                     ))}
                   </div>
+                  {state.funMode.players.length % 2 === 1 && state.funMode.players.length >= 3 && (
+                    <div className="text-xs text-amber-300">
+                      Nombre impair detecte: un joueur sera en repos a chaque tour de ligue.
+                    </div>
+                  )}
                 </div>
 
                 {state.funMode.matches.length === 0 ? (
-                  <div className="text-sm text-white/70">Ajoute au moins 2 joueurs puis clique sur "Generer les matchs".</div>
+                  <div className="text-sm text-white/70">Ajoute au moins 2 joueurs puis clique sur "Generer ligue".</div>
                 ) : (
                   <div className="space-y-2">
+                    <div className="text-xs text-white/60 mb-1">Ligue (round-robin)</div>
                     {state.funMode.matches
                       .slice()
                       .sort((a, b) => a.order - b.order)
@@ -2806,6 +3007,78 @@ export default function App() {
                   </div>
                 )}
               </Section>
+
+              <Section
+                title="Parties Simultanees (Classement Par Position)"
+                right={
+                  <Button variant="ghost" onClick={() => addFunPositionRound()} disabled={state.funMode.players.length < 2}>
+                    + Ajouter une manche
+                  </Button>
+                }
+              >
+                {state.funMode.positionRounds.length === 0 ? (
+                  <div className="text-sm text-white/70">Ajoute une manche pour saisir les positions (1er, 2e, etc.).</div>
+                ) : (
+                  <div className="space-y-3">
+                    {state.funMode.positionRounds.map((round, idx) => (
+                      <div key={round.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <div className="font-semibold text-sm">Manche {idx + 1}</div>
+                          <Button variant="danger" onClick={() => deleteFunPositionRound(round.id)}>
+                            Supprimer
+                          </Button>
+                        </div>
+                        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                          {Array.from({ length: state.funMode.players.length }).map((_, posIdx) => (
+                            <div key={`${round.id}_${posIdx}`}>
+                              <div className="mb-1 text-xs text-white/60">Position {posIdx + 1}</div>
+                              <Select
+                                value={round.positions[posIdx] ?? ""}
+                                onChange={(v) => setFunRoundPosition(round.id, posIdx, v)}
+                                options={state.funMode.players}
+                                placeholder="Joueur..."
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Section>
+
+              <Section title="Top 4 — Demi / Petite Finale / Finale">
+                {state.funMode.finals.length === 0 ? (
+                  <div className="text-sm text-white/70">Genere le top 4 apres la ligue pour creer les finales.</div>
+                ) : (
+                  <div className="space-y-2">
+                    {state.funMode.finals
+                      .slice()
+                      .sort((a, b) => a.order - b.order)
+                      .map((m) => (
+                        <div key={m.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                            <div className="text-sm">
+                              <Pill>{m.phase}</Pill>
+                              <span className="ml-2 font-semibold">{m.a || "?"}</span>
+                              <span className="mx-2 text-white/50">vs</span>
+                              <span className="font-semibold">{m.b || "?"}</span>
+                            </div>
+                            <div className="w-full md:w-56">
+                              <Select
+                                value={normName(m.winner)}
+                                onChange={(v) => setFunFinalWinner(m.id, v)}
+                                options={[m.a, m.b].filter(isNonEmptyString)}
+                                placeholder="Vainqueur..."
+                                disabled={!m.a || !m.b}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </Section>
             </div>
 
             <div className="space-y-4">
@@ -2818,8 +3091,11 @@ export default function App() {
                         <span className="h-2.5 w-2.5 rounded-full" style={{ background: getPlayerColor(r.name) }} />
                         <span className="font-semibold">{r.name}</span>
                       </div>
-                      <div className="text-xs text-white/70">
-                        <span className="font-bold text-white">{r.wins}</span> V / {r.played} M
+                      <div className="text-xs text-white/70 text-right">
+                        <div>
+                          <span className="font-bold text-white">{r.total}</span> pts
+                        </div>
+                        <div>{r.wins} V / {r.played} M / {r.posPts} pos</div>
                       </div>
                     </div>
                   ))}
@@ -2827,12 +3103,38 @@ export default function App() {
                 </div>
               </Section>
 
+              <Section title="Podium Fun">
+                <div className="space-y-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/70">1er</span>
+                    <span className="font-semibold">{funPodium.first || "-"}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/70">2e</span>
+                    <span className="font-semibold">{funPodium.second || "-"}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-white/70">3e</span>
+                    <span className="font-semibold">{funPodium.third || "-"}</span>
+                  </div>
+                  {funPodium.provisional && <div className="text-xs text-white/60">Podium provisoire (avant resultat final complet).</div>}
+                </div>
+              </Section>
+
+              <Section title="Cagnotte Fun">
+                <div className="text-sm text-white/70 space-y-1">
+                  <div>Mode argent: <span className="font-semibold text-white">{state.funMode.moneyEnabled ? "Active" : "Desactive"}</span></div>
+                  <div>Mise par joueur: <span className="font-semibold text-white">{formatEUR(state.funMode.moneyPerPlayer)}</span></div>
+                  <div>Total: <span className="font-semibold text-white">{formatEUR(funPotEUR)}</span></div>
+                </div>
+              </Section>
+
               <Section title="Regles Fun">
                 <div className="text-sm text-white/70 space-y-2">
                   <div>• Mode independant des saisons.</div>
                   <div>• Maximum 8 joueurs.</div>
-                  <div>• Tous les joueurs se rencontrent une fois.</div>
-                  <div>• Une victoire compte pour 1 point.</div>
+                  <div>• Ligue round-robin + top 4 automatique.</div>
+                  <div>• Classement = (victoires x3) + points de position par manche.</div>
                 </div>
               </Section>
             </div>
