@@ -3446,6 +3446,102 @@ export default function App() {
     logAudit("Export résumé soirée PDF", `S${soiree.number}`);
   }
 
+  function buildSoireeHighlightsText(soiree: Soiree) {
+    const rankingRows = computeSoireeRankingRows(
+      soiree,
+      currentSeason,
+      effectiveRules,
+      activeSoireeRulePolicies
+    );
+    const highlights = buildSoireeHighlights(soiree, currentSeason, rankingRows);
+    const durationMs = getSoireeDurationMs(soiree, Date.now());
+    const lines: string[] = [];
+    lines.push(`Highlights Soirée ${soiree.number} - ${currentSeason.name}`);
+    lines.push(`Date: ${new Date().toLocaleString("fr-FR")}`);
+    lines.push(`Durée: ${durationMs > 0 ? formatDuration(durationMs) : "n/a"}`);
+    lines.push("");
+    if (!highlights.length) {
+      lines.push("Aucun highlight détecté.");
+    } else {
+      highlights.forEach((h, idx) => lines.push(`${idx + 1}. ${h.title} — ${h.detail}`));
+    }
+    return lines.join("\n");
+  }
+
+  function exportSoireeHighlightsText(soiree: Soiree) {
+    const text = buildSoireeHighlightsText(soiree);
+    downloadTextFile(`highlights_soiree_${soiree.number}.txt`, text, "text/plain;charset=utf-8");
+    logAudit("Export highlights", `S${soiree.number}`);
+  }
+
+  function exportSoireeHighlightsPDF(soiree: Soiree) {
+    const rankingRows = computeSoireeRankingRows(
+      soiree,
+      currentSeason,
+      effectiveRules,
+      activeSoireeRulePolicies
+    );
+    const highlights = buildSoireeHighlights(soiree, currentSeason, rankingRows);
+    const durationMs = getSoireeDurationMs(soiree, Date.now());
+    const list = highlights.length
+      ? `<ol>${highlights.map((h) => `<li><strong>${h.title}</strong> — ${h.detail}</li>`).join("")}</ol>`
+      : `<p>Aucun highlight détecté.</p>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Highlights Soirée ${soiree.number}</title>
+    <style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;padding:24px}ol{padding-left:20px}li{margin:8px 0}</style>
+    </head><body><h1>Highlights Soirée ${soiree.number}</h1><p>Saison: ${currentSeason.name}</p><p>Date: ${new Date().toLocaleString("fr-FR")}</p>
+    <p>Durée: ${durationMs > 0 ? formatDuration(durationMs) : "n/a"}</p>${list}</body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    w.print();
+    logAudit("Export highlights PDF", `S${soiree.number}`);
+  }
+
+  function exportSoireeStatsPDF(soiree: Soiree) {
+    const { pts, wins, bonus } = computePointsFromMatches(
+      soiree.matches,
+      soiree.rebuys,
+      soiree.number,
+      currentSeason,
+      effectiveRules,
+      activeSoireeRulePolicies
+    );
+    const ranking = uniq([...soiree.pools.A, ...soiree.pools.B].map(normName))
+      .filter(isNonEmptyString)
+      .map((p: string) => ({
+        name: p,
+        pts: pts.get(p) ?? 0,
+        wins: wins.get(p) ?? 0,
+        bonus: bonus.get(p) ?? 0,
+      }))
+      .sort((a, b) => b.pts - a.pts || b.wins - a.wins || b.bonus - a.bonus || a.name.localeCompare(b.name));
+    const rows = ranking
+      .map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.pts}</td><td>${r.wins}</td><td>${r.bonus}</td></tr>`)
+      .join("");
+    const durationMs = getSoireeDurationMs(soiree, Date.now());
+    const highlights = buildSoireeHighlights(soiree, currentSeason, ranking);
+    const highlightsHtml = highlights.length
+      ? `<ol>${highlights.map((h) => `<li><strong>${h.title}</strong> — ${h.detail}</li>`).join("")}</ol>`
+      : `<p>Aucun highlight détecté.</p>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Stats Soirée ${soiree.number}</title>
+    <style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;padding:24px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #ddd;padding:8px;text-align:left}ol{padding-left:20px}</style>
+    </head><body><h1>Stats Soirée ${soiree.number}</h1><p>Saison: ${currentSeason.name}</p>
+    <p>Date: ${new Date().toLocaleString("fr-FR")}</p>
+    <p>Durée: ${durationMs > 0 ? formatDuration(durationMs) : "n/a"} • Re-buys: ${soiree.rebuys.length} • Jackpot: ${formatEUR(computeSoireeJackpotEUR(soiree, currentSeason, effectiveRules, activeSoireeRulePolicies))}</p>
+    <h2>Classement</h2>
+    <table><thead><tr><th>#</th><th>Joueur</th><th>Points</th><th>Victoires</th><th>Bonus</th></tr></thead><tbody>${rows}</tbody></table>
+    <h2>Highlights</h2>${highlightsHtml}</body></html>`;
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    w.print();
+    logAudit("Export stats soirée PDF", `S${soiree.number}`);
+  }
+
   function setSoireeLockedById(soireeId: string, locked: boolean) {
     updateSeason((season) => {
       const soirees = season.soirees.map((s: Soiree) => (s.id === soireeId ? { ...s, locked } : s));
@@ -8472,6 +8568,15 @@ export default function App() {
                 </Button>
                 <Button variant="ghost" onClick={() => exportSoireeSummaryPDF(closureSoiree)}>
                   Export résumé (PDF)
+                </Button>
+                <Button variant="ghost" onClick={() => exportSoireeHighlightsText(closureSoiree)}>
+                  Export highlights (.txt)
+                </Button>
+                <Button variant="ghost" onClick={() => exportSoireeHighlightsPDF(closureSoiree)}>
+                  Export highlights (PDF)
+                </Button>
+                <Button variant="ghost" onClick={() => exportSoireeStatsPDF(closureSoiree)}>
+                  Export stats (PDF)
                 </Button>
                 <Button
                   variant={closureSoiree.locked ? "danger" : "primary"}
