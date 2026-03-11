@@ -3446,6 +3446,57 @@ export default function App() {
     logAudit("Export résumé soirée PDF", `S${soiree.number}`);
   }
 
+  function buildRankingTimelineSvg(
+    labels: number[],
+    series: Array<{ player: string; ranks: number[] }>,
+    colorByPlayer: Map<string, string>
+  ) {
+    const width = 720;
+    const height = 280;
+    const pad = 34;
+    const innerW = width - pad * 2;
+    const innerH = height - pad * 2;
+    const allRanks = series.flatMap((s) => s.ranks);
+    const maxRank = Math.max(1, ...allRanks, series.length);
+    const steps = Math.max(1, labels.length - 1);
+
+    const xAt = (i: number) => pad + (i / steps) * innerW;
+    const yAt = (rank: number) => {
+      if (maxRank <= 1) return pad + innerH / 2;
+      return pad + ((rank - 1) / (maxRank - 1)) * innerH;
+    };
+
+    const grid = Array.from({ length: maxRank }, (_, i) => {
+      const y = yAt(i + 1).toFixed(1);
+      return `<line x1="${pad}" x2="${pad + innerW}" y1="${y}" y2="${y}" stroke="rgba(255,255,255,0.06)" stroke-width="1"/>`;
+    }).join("");
+
+    const xLabels = labels
+      .map((label, i) => {
+        const x = xAt(i).toFixed(1);
+        return `<text x="${x}" y="${height - 8}" text-anchor="middle" fill="rgba(255,255,255,0.6)" font-size="10">S${label}</text>`;
+      })
+      .join("");
+
+    const paths = series
+      .map((s) => {
+        if (!s.ranks.length) return "";
+        const d = s.ranks
+          .map((r, i) => `${i === 0 ? "M" : "L"} ${xAt(i).toFixed(1)} ${yAt(r).toFixed(1)}`)
+          .join(" ");
+        const color = colorByPlayer.get(s.player) ?? "#93c5fd";
+        return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`;
+      })
+      .join("");
+
+    return `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="0" width="${width}" height="${height}" fill="rgba(8,12,20,0.9)" rx="18" />
+      ${grid}
+      ${paths}
+      ${xLabels}
+    </svg>`;
+  }
+
   function buildSoireeHighlightsText(soiree: Soiree) {
     const rankingRows = computeSoireeRankingRows(
       soiree,
@@ -3486,10 +3537,22 @@ export default function App() {
     const list = highlights.length
       ? `<ol>${highlights.map((h) => `<li><strong>${h.title}</strong> — ${h.detail}</li>`).join("")}</ol>`
       : `<p>Aucun highlight détecté.</p>`;
+    const chart = buildRankingTimelineSvg(rankingTimeline.labels, rankingTimeline.series, playerColors);
     const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Highlights Soirée ${soiree.number}</title>
-    <style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;padding:24px}ol{padding-left:20px}li{margin:8px 0}</style>
-    </head><body><h1>Highlights Soirée ${soiree.number}</h1><p>Saison: ${currentSeason.name}</p><p>Date: ${new Date().toLocaleString("fr-FR")}</p>
-    <p>Durée: ${durationMs > 0 ? formatDuration(durationMs) : "n/a"}</p>${list}</body></html>`;
+    <style>
+      body{font-family:"Space Grotesk",Arial,sans-serif;background:#0b0f17;color:#e5e7eb;padding:28px}
+      h1,h2{font-family:"Syne",Arial,sans-serif;margin:0 0 8px}
+      .card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:16px;margin:16px 0}
+      ol{padding-left:20px}li{margin:8px 0}
+      .meta{color:#94a3b8;font-size:12px}
+    </style>
+    </head><body>
+    <h1>Highlights Soirée ${soiree.number}</h1>
+    <div class="meta">Saison: ${currentSeason.name} • ${new Date().toLocaleString("fr-FR")} • Durée: ${durationMs > 0 ? formatDuration(durationMs) : "n/a"}</div>
+    <div class="card">${list}</div>
+    <h2>Évolution du classement</h2>
+    <div class="card">${chart}</div>
+    </body></html>`;
     const w = window.open("", "_blank");
     if (!w) return;
     w.document.write(html);
@@ -3525,14 +3588,28 @@ export default function App() {
     const highlightsHtml = highlights.length
       ? `<ol>${highlights.map((h) => `<li><strong>${h.title}</strong> — ${h.detail}</li>`).join("")}</ol>`
       : `<p>Aucun highlight détecté.</p>`;
+    const chart = buildRankingTimelineSvg(rankingTimeline.labels, rankingTimeline.series, playerColors);
     const html = `<!doctype html><html><head><meta charset="utf-8"/><title>Stats Soirée ${soiree.number}</title>
-    <style>body{font-family:-apple-system,Segoe UI,Arial,sans-serif;padding:24px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{border:1px solid #ddd;padding:8px;text-align:left}ol{padding-left:20px}</style>
-    </head><body><h1>Stats Soirée ${soiree.number}</h1><p>Saison: ${currentSeason.name}</p>
-    <p>Date: ${new Date().toLocaleString("fr-FR")}</p>
-    <p>Durée: ${durationMs > 0 ? formatDuration(durationMs) : "n/a"} • Re-buys: ${soiree.rebuys.length} • Jackpot: ${formatEUR(computeSoireeJackpotEUR(soiree, currentSeason, effectiveRules, activeSoireeRulePolicies))}</p>
+    <style>
+      body{font-family:"Space Grotesk",Arial,sans-serif;background:#0b0f17;color:#e5e7eb;padding:28px}
+      h1,h2{font-family:"Syne",Arial,sans-serif;margin:0 0 8px}
+      .meta{color:#94a3b8;font-size:12px}
+      .card{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);border-radius:16px;padding:16px;margin:16px 0}
+      table{width:100%;border-collapse:collapse;margin-top:12px}
+      th,td{border:1px solid rgba(255,255,255,0.12);padding:8px;text-align:left}
+      th{background:rgba(255,255,255,0.06)}
+      ol{padding-left:20px}
+    </style>
+    </head><body>
+    <h1>Stats Soirée ${soiree.number}</h1>
+    <div class="meta">Saison: ${currentSeason.name} • ${new Date().toLocaleString("fr-FR")}</div>
+    <div class="card">Durée: ${durationMs > 0 ? formatDuration(durationMs) : "n/a"} • Re-buys: ${soiree.rebuys.length} • Jackpot: ${formatEUR(computeSoireeJackpotEUR(soiree, currentSeason, effectiveRules, activeSoireeRulePolicies))}</div>
     <h2>Classement</h2>
-    <table><thead><tr><th>#</th><th>Joueur</th><th>Points</th><th>Victoires</th><th>Bonus</th></tr></thead><tbody>${rows}</tbody></table>
-    <h2>Highlights</h2>${highlightsHtml}</body></html>`;
+    <div class="card"><table><thead><tr><th>#</th><th>Joueur</th><th>Points</th><th>Victoires</th><th>Bonus</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <h2>Évolution du classement</h2>
+    <div class="card">${chart}</div>
+    <h2>Highlights</h2><div class="card">${highlightsHtml}</div>
+    </body></html>`;
     const w = window.open("", "_blank");
     if (!w) return;
     w.document.write(html);
@@ -5478,6 +5555,18 @@ export default function App() {
                     </Button>
                     <Button variant="ghost" onClick={() => recalcFinalAndPFinal()} disabled={currentSoireeLocked || readOnlyMode}>
                       Calculer finales
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setClosureSoireeId(currentSoiree.id);
+                        setClosureAutoExportStatus("");
+                        setShowSoireeClosureModal(true);
+                        logAudit("Ouverture export soirée", `S${currentSoiree.number}`);
+                      }}
+                      disabled={readOnlyMode}
+                    >
+                      Export soirée
                     </Button>
                     <Button variant="ghost" onClick={() => setCompactMode((v) => !v)}>
                       {compactMode ? "Mode détaillé" : "Mode compact"}
