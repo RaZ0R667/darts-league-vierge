@@ -5043,7 +5043,7 @@ export default function App() {
               </div>
               <div>
                 <div className="text-[11px] uppercase tracking-[0.3em] text-white/50">Darts League</div>
-                <h1 className="text-2xl font-extrabold">Tableau de bord</h1>
+                <h1 className="text-2xl font-extrabold">Quartier Général 🎯</h1>
                 <div className="mt-1 text-sm text-white/70">{currentSeason.name} • Sauvegarde locale</div>
               </div>
             </div>
